@@ -55,11 +55,12 @@ an individual is officially representing the community in public spaces.
 ## Enforcement
 
 Report abusive, harassing, or otherwise unacceptable behavior confidentially
-through the repository's GitHub private vulnerability reporting flow described
-in [SECURITY.md](SECURITY.md), and state that the report concerns community
-conduct. Do not publish sensitive conduct reports in an issue. All complaints
-will be reviewed and investigated promptly and fairly. Community leaders are
-obligated to respect the privacy and security of the reporter.
+through [info@rsitech.ai](mailto:info@rsitech.ai), and state that the report
+concerns community conduct. The private GitHub reporting flow in
+[SECURITY.md](SECURITY.md) is also available. Do not publish sensitive conduct
+reports in an issue. All complaints will be reviewed and investigated promptly
+and fairly. Community leaders are obligated to respect the privacy and security
+of the reporter.
 
 ## Enforcement Guidelines
 

@@ -5,6 +5,9 @@
 
 IdeaForge is a native Mac, iPhone, and Apple Watch workspace for turning spoken ideas into transcripts, plans, validation work, and reviewable engineering packets. The repository contains the Apple clients, shared Swift core, tests, release tooling, and a single-node community backend for development and personal evaluation.
 
+Public maintainer: [RSI Tech](https://rsitech.ai). Copyright owner: Rafal
+Sikora. Public and confidential project contact: [info@rsitech.ai](mailto:info@rsitech.ai).
+
 **Project status:** pre-1.0 and under active development. The source tree is
 public, but no official binary release has been published. APIs, backend
 contracts, and persisted formats may change before 1.0; versioned changes are

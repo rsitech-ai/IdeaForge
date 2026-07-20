@@ -128,6 +128,20 @@ class CIReleaseConfigurationTests(unittest.TestCase):
         self.assertIn('directory: "/"', text)
         self.assertIn("interval: weekly", text)
 
+    def test_public_owner_maintainer_and_contact_contract(self) -> None:
+        notice = (ROOT / "NOTICE").read_text(encoding="utf-8")
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        security = (ROOT / "SECURITY.md").read_text(encoding="utf-8")
+        support = (ROOT / "SUPPORT.md").read_text(encoding="utf-8")
+        trademarks = (ROOT / "TRADEMARKS.md").read_text(encoding="utf-8")
+
+        self.assertIn("Copyright 2026 Rafal Sikora", notice)
+        self.assertIn("Public maintainer: [RSI Tech](https://rsitech.ai)", readme)
+        self.assertIn("https://rsitech.ai", readme)
+        self.assertIn("info@rsitech.ai", security)
+        self.assertIn("info@rsitech.ai", support)
+        self.assertIn("RSI Tech", trademarks)
+
     def test_placeholder_appcast_is_valid_and_has_no_unsigned_update(self) -> None:
         tree = ET.parse(APPCAST)
         channel = tree.getroot().find("channel")

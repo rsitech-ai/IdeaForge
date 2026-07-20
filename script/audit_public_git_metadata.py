@@ -12,8 +12,8 @@ import sys
 
 
 ROOT = Path(__file__).resolve().parents[1]
-OWNER_NAME = "Rafał Sikora"
-ALLOWED_OWNER_EMAIL_SUFFIXES = ("@users.noreply.github.com", "@ideaforge.invalid")
+OWNER_NAMES = {"Rafal Sikora", "Rafał Sikora"}
+ALLOWED_OWNER_EMAILS = {"24563931+s1korrrr@users.noreply.github.com"}
 
 
 def arguments(argv: list[str]) -> argparse.Namespace:
@@ -84,8 +84,8 @@ def exposed_commits(root: Path) -> set[str]:
         commit, author_name, author_email, committer_name, committer_email = fields
         identities = ((author_name, author_email), (committer_name, committer_email))
         if any(
-            name == OWNER_NAME
-            and not email.casefold().endswith(ALLOWED_OWNER_EMAIL_SUFFIXES)
+            name in OWNER_NAMES
+            and email.casefold() not in ALLOWED_OWNER_EMAILS
             for name, email in identities
         ):
             exposed.add(commit)

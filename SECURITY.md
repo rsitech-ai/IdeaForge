@@ -12,9 +12,9 @@ Use GitHub's private vulnerability reporting for this repository:
 3. Include affected versions, impact, reproduction steps, and a minimal proof
    of concept with secrets and personal data removed.
 
-If the private-reporting button is unavailable, wait for it to be enabled rather
-than publishing the report. This project does not designate a personal security
-email address.
+If the private-reporting button is unavailable, send the report confidentially
+to [info@rsitech.ai](mailto:info@rsitech.ai). Do not copy a confidential report
+to a public issue or discussion.
 
 Maintainers will acknowledge the report in the private advisory, investigate,
 coordinate a fix and disclosure window, and credit the reporter if requested.

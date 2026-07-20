@@ -4,6 +4,10 @@ Use [GitHub Issues](https://github.com/rsitech-ai/IdeaForge/issues) for reproduc
 
 Report suspected vulnerabilities through the private channel in [SECURITY.md](SECURITY.md). Do not disclose exploit details in an issue.
 
+RSI Tech maintains the public project. For public or confidential project
+contact, email [info@rsitech.ai](mailto:info@rsitech.ai); confidential material
+must follow the handling rules in [SECURITY.md](SECURITY.md).
+
 ## Before filing an issue
 
 - Record the platform, app version, build number, and macOS, iOS, or watchOS version.

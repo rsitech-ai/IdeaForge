@@ -113,8 +113,12 @@ class PublicSourceSnapshotTests(unittest.TestCase):
         self.assertEqual(self.git("branch", "--show-current", cwd=self.destination).stdout.strip(), "main")
         self.assertEqual(self.git("rev-list", "--count", "HEAD", cwd=self.destination).stdout.strip(), "1")
         self.assertEqual(
-            self.git("log", "-1", "--format=%ae", cwd=self.destination).stdout.strip(),
-            "source-release@ideaforge.invalid",
+            self.git("log", "-1", "--format=%an%x00%ae", cwd=self.destination).stdout.strip(),
+            "Rafal Sikora\x0024563931+s1korrrr@users.noreply.github.com",
+        )
+        self.assertIn(
+            "Signed-off-by: Rafal Sikora <24563931+s1korrrr@users.noreply.github.com>",
+            self.git("log", "-1", "--format=%B", cwd=self.destination).stdout,
         )
         old_object = self.git("cat-file", "-e", f"{private_commit}^{{commit}}", cwd=self.destination, check=False)
         self.assertNotEqual(old_object.returncode, 0)
