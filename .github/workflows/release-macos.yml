@@ -1,0 +1,322 @@
+name: Release notarized Mac app
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing v<version> tag to release
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  attestations: write
+  id-token: write
+
+concurrency:
+  group: release-macos
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: macos-26
+    timeout-minutes: 90
+    environment:
+      name: release
+    steps:
+      - name: Check out the tagged source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Select Xcode 26.6
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -d /Applications/Xcode_26.6.app
+          sudo xcode-select --switch /Applications/Xcode_26.6.app/Contents/Developer
+          xcodebuild -version | grep -Fx 'Xcode 26.6'
+
+      - name: Install XcodeGen 2.45.4
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/xcodegen.zip"
+          curl -fsSL --proto '=https' --tlsv1.2 \
+            https://github.com/yonaskolb/XcodeGen/releases/download/2.45.4/xcodegen.zip \
+            -o "$archive"
+          printf '090ec29491aad50aec10631bf6e62253fed733c50f3aab0f5ffc86bc170bdbef  %s\n' "$archive" \
+            | shasum -a 256 -c -
+          ditto -x -k "$archive" "$RUNNER_TEMP/xcodegen"
+          echo "$RUNNER_TEMP/xcodegen/xcodegen/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/xcodegen/xcodegen/bin/xcodegen" --version | grep -Fx 'Version: 2.45.4'
+
+      - name: Verify tag, version, public tree, and tests
+        id: release-inputs
+        shell: bash
+        env:
+          REQUESTED_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          [[ "$REQUESTED_TAG" =~ ^v([0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?)$ ]]
+          version="${BASH_REMATCH[1]}"
+          test "$(git describe --tags --exact-match HEAD)" = "$REQUESTED_TAG"
+          git fetch --no-tags origin main
+          test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
+          configured_version="$(awk -F'"' '/MARKETING_VERSION:/ { print $2; exit }' project.yml)"
+          test "$version" = "$configured_version"
+          xcodegen generate
+          test -f IdeaForge.xcodeproj/project.pbxproj
+          swift test
+          python3 script/test_audit_public_source.py
+          python3 script/test_create_public_source_snapshot.py
+          python3 script/test_ci_release_config.py
+          python3 script/test_sparkle_configuration.py
+          python3 script/audit_public_git_metadata.py --strict
+          python3 script/test_validate_app_store_assets.py
+          ./script/test_release_macos.sh
+          ./script/test_verify_production.sh
+          python3 script/mock_backend.py --self-test
+          mkdir -p .build/reports
+          python3 script/audit_public_source.py . \
+            --profile public \
+            --json-out .build/reports/public-source-audit.json \
+            --markdown-out .build/reports/public-source-audit.md
+          worktree_status="$(git status --porcelain --untracked-files=all)"
+          test -z "$worktree_status"
+          echo "tag=$REQUESTED_TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Create ephemeral signing and notarization keychain
+        shell: bash
+        env:
+          DEVELOPER_ID_P12_BASE64: ${{ secrets.DEVELOPER_ID_P12_BASE64 }}
+          DEVELOPER_ID_P12_PASSWORD: ${{ secrets.DEVELOPER_ID_P12_PASSWORD }}
+          SIGNING_KEYCHAIN_PASSWORD: ${{ secrets.SIGNING_KEYCHAIN_PASSWORD }}
+          NOTARY_API_KEY_P8_BASE64: ${{ secrets.NOTARY_API_KEY_P8_BASE64 }}
+          NOTARY_API_KEY_ID: ${{ secrets.NOTARY_API_KEY_ID }}
+          NOTARY_API_ISSUER_ID: ${{ secrets.NOTARY_API_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          : "${DEVELOPER_ID_P12_BASE64:?Missing Developer ID certificate secret}"
+          : "${DEVELOPER_ID_P12_PASSWORD:?Missing Developer ID password secret}"
+          : "${SIGNING_KEYCHAIN_PASSWORD:?Missing temporary keychain password secret}"
+          : "${NOTARY_API_KEY_P8_BASE64:?Missing notary private key secret}"
+          : "${NOTARY_API_KEY_ID:?Missing notary key ID secret}"
+          : "${NOTARY_API_ISSUER_ID:?Missing notary issuer secret}"
+          umask 077
+          keychain="$RUNNER_TEMP/ideaforge-signing.keychain-db"
+          certificate="$RUNNER_TEMP/ideaforge-developer-id.p12"
+          notary_key="$RUNNER_TEMP/ideaforge-notary.p8"
+          printf '%s' "$DEVELOPER_ID_P12_BASE64" | base64 --decode > "$certificate"
+          printf '%s' "$NOTARY_API_KEY_P8_BASE64" | base64 --decode > "$notary_key"
+          security create-keychain -p "$SIGNING_KEYCHAIN_PASSWORD" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$SIGNING_KEYCHAIN_PASSWORD" "$keychain"
+          security default-keychain -d user -s "$keychain"
+          security list-keychains -d user -s "$keychain"
+          security import "$certificate" \
+            -k "$keychain" \
+            -P "$DEVELOPER_ID_P12_PASSWORD" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/security
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s \
+            -k "$SIGNING_KEYCHAIN_PASSWORD" \
+            "$keychain"
+          xcrun notarytool store-credentials IdeaForgeReleaseNotary \
+            --key "$notary_key" \
+            --key-id "$NOTARY_API_KEY_ID" \
+            --issuer "$NOTARY_API_ISSUER_ID" \
+            --keychain "$keychain" \
+            --validate
+          rm -f "$certificate" "$notary_key"
+          echo "IDEAFORGE_RELEASE_KEYCHAIN=$keychain" >> "$GITHUB_ENV"
+          echo "NOTARY_KEYCHAIN_PROFILE=IdeaForgeReleaseNotary" >> "$GITHUB_ENV"
+
+      - name: Build, sign, notarize, staple, and package
+        shell: bash
+        env:
+          DEVELOPMENT_TEAM: 2NY8A789TN
+          DEVELOPER_ID_APPLICATION: 325BE7BDA73543F37311F400F231DC751E87FB77
+          RELEASE_VERSION: ${{ steps.release-inputs.outputs.version }}
+        run: |
+          set -euo pipefail
+          ./script/release_macos.sh --notarize
+
+      - name: Generate SPDX SBOM
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ steps.release-inputs.outputs.version }}
+          IDEAFORGE_SOURCE_COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          export SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)"
+          python3 script/generate_sbom.py \
+            --root . \
+            --version "$RELEASE_VERSION" \
+            --output "dist/release/IdeaForge-$RELEASE_VERSION-sbom.spdx.json"
+
+      - name: Generate and verify signed Sparkle appcast
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ steps.release-inputs.outputs.version }}
+          RELEASE_TAG: ${{ steps.release-inputs.outputs.tag }}
+          SPARKLE_ED25519_PRIVATE_KEY: ${{ secrets.SPARKLE_ED25519_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          : "${SPARKLE_ED25519_PRIVATE_KEY:?Missing Sparkle EdDSA private key secret}"
+          umask 077
+          sparkle_archive="$RUNNER_TEMP/Sparkle-2.9.4.tar.xz"
+          sparkle_root="$RUNNER_TEMP/Sparkle-2.9.4"
+          sparkle_key="$RUNNER_TEMP/ideaforge-sparkle-private-key"
+          appcast_work="$RUNNER_TEMP/ideaforge-appcast"
+          curl -fsSL --proto '=https' --tlsv1.2 \
+            https://github.com/sparkle-project/Sparkle/releases/download/2.9.4/Sparkle-2.9.4.tar.xz \
+            -o "$sparkle_archive"
+          printf 'ce89daf967db1e1893ed3ebd67575ed82d3902563e3191ca92aaec9164fbdef9  %s\n' "$sparkle_archive" \
+            | shasum -a 256 -c -
+          mkdir -p "$sparkle_root" "$appcast_work"
+          tar -xJf "$sparkle_archive" -C "$sparkle_root"
+          printf '%s' "$SPARKLE_ED25519_PRIVATE_KEY" > "$sparkle_key"
+          "$sparkle_root/bin/generate_keys" --account ideaforge-release -f "$sparkle_key" >/dev/null
+          expected_public_key="$(/usr/libexec/PlistBuddy -c 'Print :SUPublicEDKey' Sources/IdeaForgeMac/Info.plist)"
+          imported_public_key="$("$sparkle_root/bin/generate_keys" --account ideaforge-release -p)"
+          test "$imported_public_key" = "$expected_public_key"
+          rm -f "$sparkle_key"
+          cp updates/appcast.xml "$appcast_work/appcast.xml"
+          cp "dist/release/IdeaForge-$RELEASE_VERSION.zip" "$appcast_work/IdeaForge-$RELEASE_VERSION.zip"
+          "$sparkle_root/bin/generate_appcast" \
+            --account ideaforge-release \
+            --download-url-prefix "https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG/" \
+            --full-release-notes-url "https://github.com/$GITHUB_REPOSITORY/releases/tag/$RELEASE_TAG" \
+            --link "https://github.com/$GITHUB_REPOSITORY" \
+            --maximum-versions 10 \
+            "$appcast_work"
+          cp "$appcast_work/appcast.xml" dist/release/appcast.xml
+          python3 - "$appcast_work/appcast.xml" "dist/release/IdeaForge-$RELEASE_VERSION.zip" "$RELEASE_VERSION" "$RELEASE_TAG" <<'PY'
+          import pathlib
+          import sys
+          import xml.etree.ElementTree as ET
+
+          feed_path, archive_path, version, tag = sys.argv[1:]
+          namespace = {"sparkle": "http://www.andymatuschak.org/xml-namespaces/sparkle"}
+          root = ET.parse(feed_path).getroot()
+          matches = []
+          for item in root.findall("./channel/item"):
+              enclosure = item.find("enclosure")
+              if enclosure is None:
+                  continue
+              short_version = enclosure.get(f"{{{namespace['sparkle']}}}shortVersionString")
+              if short_version == version:
+                  matches.append(enclosure)
+          if len(matches) != 1:
+              raise SystemExit(f"expected one appcast enclosure for {version}, found {len(matches)}")
+          enclosure = matches[0]
+          expected_url = f"https://github.com/{__import__('os').environ['GITHUB_REPOSITORY']}/releases/download/{tag}/IdeaForge-{version}.zip"
+          if enclosure.get("url") != expected_url:
+              raise SystemExit("appcast download URL mismatch")
+          if enclosure.get("length") != str(pathlib.Path(archive_path).stat().st_size):
+              raise SystemExit("appcast archive length mismatch")
+          if not enclosure.get(f"{{{namespace['sparkle']}}}edSignature"):
+              raise SystemExit("appcast EdDSA signature is missing")
+          PY
+          rm -rf "$sparkle_archive" "$sparkle_root" "$appcast_work"
+
+      - name: Attest release artifacts
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        with:
+          subject-path: |
+            dist/release/IdeaForge-${{ steps.release-inputs.outputs.version }}.dmg
+            dist/release/IdeaForge-${{ steps.release-inputs.outputs.version }}.zip
+            dist/release/SHA256SUMS
+            dist/release/manifest.json
+            dist/release/IdeaForge-${{ steps.release-inputs.outputs.version }}-sbom.spdx.json
+            dist/release/appcast.xml
+
+      - name: Preserve release evidence in workflow artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: IdeaForge-${{ steps.release-inputs.outputs.version }}-notarized
+          path: |
+            dist/release/IdeaForge-${{ steps.release-inputs.outputs.version }}.dmg
+            dist/release/IdeaForge-${{ steps.release-inputs.outputs.version }}.zip
+            dist/release/SHA256SUMS
+            dist/release/manifest.json
+            dist/release/IdeaForge-${{ steps.release-inputs.outputs.version }}-sbom.spdx.json
+            dist/release/appcast.xml
+            dist/release/notary/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish GitHub release and appcast
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ steps.release-inputs.outputs.version }}
+          RELEASE_TAG: ${{ steps.release-inputs.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "Release already exists: $RELEASE_TAG" >&2
+            exit 1
+          fi
+          release_notes="docs/releases/$RELEASE_VERSION.md"
+          test -s "$release_notes"
+          gh release create "$RELEASE_TAG" \
+            --verify-tag \
+            --draft \
+            --notes-file "$release_notes" \
+            --title "IdeaForge $RELEASE_VERSION" \
+            "dist/release/IdeaForge-$RELEASE_VERSION.dmg" \
+            "dist/release/IdeaForge-$RELEASE_VERSION.zip" \
+            "dist/release/SHA256SUMS" \
+            "dist/release/manifest.json" \
+            "dist/release/IdeaForge-$RELEASE_VERSION-sbom.spdx.json" \
+            "dist/release/appcast.xml"
+          appcast_sha="$(gh api "repos/$GITHUB_REPOSITORY/contents/updates/appcast.xml?ref=main" --jq .sha)"
+          python3 - dist/release/appcast.xml "$RELEASE_TAG" "$appcast_sha" "$RUNNER_TEMP/appcast-update.json" <<'PY'
+          import base64
+          import json
+          import pathlib
+          import sys
+
+          appcast, tag, sha, output = sys.argv[1:]
+          payload = {
+              "message": f"chore: publish appcast for {tag}",
+              "content": base64.b64encode(pathlib.Path(appcast).read_bytes()).decode("ascii"),
+              "sha": sha,
+              "branch": "main",
+          }
+          pathlib.Path(output).write_text(json.dumps(payload), encoding="utf-8")
+          PY
+          if ! gh api \
+            --method PUT \
+            "repos/$GITHUB_REPOSITORY/contents/updates/appcast.xml" \
+            --input "$RUNNER_TEMP/appcast-update.json" >/dev/null; then
+            echo "Appcast publication failed; the GitHub release remains a draft." >&2
+            exit 1
+          fi
+          gh release edit "$RELEASE_TAG" --draft=false
+          rm -f "$RUNNER_TEMP/appcast-update.json"
+
+      - name: Delete ephemeral release credentials
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          rm -f \
+            "$RUNNER_TEMP/ideaforge-developer-id.p12" \
+            "$RUNNER_TEMP/ideaforge-notary.p8" \
+            "$RUNNER_TEMP/ideaforge-sparkle-private-key" \
+            "$RUNNER_TEMP/appcast-update.json"
+          keychain="${IDEAFORGE_RELEASE_KEYCHAIN:-$RUNNER_TEMP/ideaforge-signing.keychain-db}"
+          if [[ -f "$keychain" ]]; then
+            security delete-keychain "$keychain"
+          fi

@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleExecutable</key>
+  <string>$(EXECUTABLE_NAME)</string>
+  <key>CFBundleIdentifier</key>
+  <string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+  <key>CFBundleShortVersionString</key>
+  <string>$(MARKETING_VERSION)</string>
+  <key>CFBundleVersion</key>
+  <string>$(CURRENT_PROJECT_VERSION)</string>
+  <key>CFBundleName</key>
+  <string>$(PRODUCT_NAME)</string>
+  <key>CFBundlePackageType</key>
+  <string>$(PRODUCT_BUNDLE_PACKAGE_TYPE)</string>
+  <key>LSApplicationCategoryType</key>
+  <string>public.app-category.productivity</string>
+  <key>LSMinimumSystemVersion</key>
+  <string>14.0</string>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>IdeaForge can capture voice ideas when you start a recording on this Mac.</string>
+  <key>NSSpeechRecognitionUsageDescription</key>
+  <string>IdeaForge can transcribe local voice recordings when you choose local speech recognition.</string>
+  <key>NSPrincipalClass</key>
+  <string>NSApplication</string>
+  <key>SUEnableInstallerLauncherService</key>
+  <true/>
+  <key>SUFeedURL</key>
+  <string>https://raw.githubusercontent.com/rsitech-ai/IdeaForge/main/updates/appcast.xml</string>
+  <key>SUPublicEDKey</key>
+  <string>qKtY2+Q/f/cSRGAagdh9KTqQvu+/QuNyd+zNaRqZe/k=</string>
+</dict>
+</plist>

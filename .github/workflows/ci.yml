@@ -1,0 +1,130 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      - name: Check out source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Select Xcode 26.6
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -d /Applications/Xcode_26.6.app
+          sudo xcode-select --switch /Applications/Xcode_26.6.app/Contents/Developer
+          xcodebuild -version | grep -Fx 'Xcode 26.6'
+
+      - name: Install XcodeGen 2.45.4
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/xcodegen.zip"
+          curl -fsSL --proto '=https' --tlsv1.2 \
+            https://github.com/yonaskolb/XcodeGen/releases/download/2.45.4/xcodegen.zip \
+            -o "$archive"
+          printf '090ec29491aad50aec10631bf6e62253fed733c50f3aab0f5ffc86bc170bdbef  %s\n' "$archive" \
+            | shasum -a 256 -c -
+          ditto -x -k "$archive" "$RUNNER_TEMP/xcodegen"
+          echo "$RUNNER_TEMP/xcodegen/xcodegen/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/xcodegen/xcodegen/bin/xcodegen" --version | grep -Fx 'Version: 2.45.4'
+
+      - name: Generate project
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodegen generate
+          test -f IdeaForge.xcodeproj/project.pbxproj
+
+      - name: Test shared core and release contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          swift test
+          python3 script/test_audit_public_source.py
+          python3 script/test_audit_public_git_metadata.py
+          python3 script/test_create_public_source_snapshot.py
+          python3 script/test_ci_release_config.py
+          python3 script/test_sparkle_configuration.py
+          python3 script/audit_public_git_metadata.py --new-only
+          python3 script/test_validate_app_store_assets.py
+          ./script/test_release_macos.sh
+          ./script/test_verify_production.sh
+          ./script/verify_production.sh --self-test
+          python3 script/mock_backend.py --self-test
+          python3 script/review_privacy_logs.py --self-test
+
+      - name: Audit public source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .build/reports
+          python3 script/audit_public_source.py . \
+            --profile public \
+            --json-out .build/reports/public-source-audit.json \
+            --markdown-out .build/reports/public-source-audit.md
+
+      - name: Build unsigned Apple apps
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild -quiet \
+            -project IdeaForge.xcodeproj \
+            -scheme IdeaForgeMac \
+            -configuration Debug \
+            -derivedDataPath DerivedData-ci-mac \
+            CODE_SIGNING_ALLOWED=NO \
+            SWIFT_TREAT_WARNINGS_AS_ERRORS=YES \
+            build
+          xcodebuild -quiet \
+            -project IdeaForge.xcodeproj \
+            -scheme IdeaForgeiOS \
+            -configuration Debug \
+            -derivedDataPath DerivedData-ci-ios \
+            -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO \
+            SWIFT_TREAT_WARNINGS_AS_ERRORS=YES \
+            build
+          xcodebuild -quiet \
+            -project IdeaForge.xcodeproj \
+            -scheme IdeaForgeWatch \
+            -configuration Debug \
+            -derivedDataPath DerivedData-ci-watch \
+            -destination 'generic/platform=watchOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO \
+            SWIFT_TREAT_WARNINGS_AS_ERRORS=YES \
+            build
+
+      - name: Prove verification did not modify tracked source
+        shell: bash
+        run: |
+          set -euo pipefail
+          worktree_status="$(git status --porcelain --untracked-files=all)"
+          test -z "$worktree_status"
+
+      - name: Upload audit reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: public-source-audit
+          path: .build/reports/
+          if-no-files-found: warn
+          include-hidden-files: true
+          retention-days: 14
