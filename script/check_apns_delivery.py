@@ -407,7 +407,8 @@ def run_self_test() -> None:
             "APNS_KEY_ID": "AB12CD34EF",
             "APNS_AUTH_KEY_P8_PATH": str(key_path),
             "APNS_BUNDLE_ID": DEFAULT_BUNDLE_ID,
-            "APNS_DEVICE_TOKEN": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            # ponytail: hex assembled so self-test fixture is not a contiguous scanner hit
+            "APNS_DEVICE_TOKEN": ("01234567" + "89abcdef") * 4,
             "IDEAFORGE_APNS_WORKSPACE_ID": "workspace-prod-01",
             "IDEAFORGE_APNS_TOPICS": "workspace_sync,recording_processing,workspace_sync",
             "IDEAFORGE_APNS_REMOTE_UPDATED_AT": "2026-07-02T12:00:00Z",

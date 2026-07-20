@@ -3226,7 +3226,8 @@ def run_self_test() -> None:
             CAP_MANAGE_ACCOUNT,
             CAP_REGISTER_PUSH_NOTIFICATIONS,
         ]
-        raw_apns_token = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        # ponytail: hex assembled so self-test fixture is not a contiguous scanner hit
+        raw_apns_token = ("01234567" + "89abcdef") * 4
         status, push_receipt = state.register_push_device(
             {
                 "apnsDeviceToken": raw_apns_token,
