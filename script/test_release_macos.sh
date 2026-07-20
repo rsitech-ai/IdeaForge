@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RELEASE_SCRIPT="$ROOT_DIR/script/release_macos.sh"
 EXPECTED_TEAM="2NY8A789TN"
-EXPECTED_IDENTITY="325BE7BDA73543F37311F400F231DC751E87FB77"
+EXPECTED_IDENTITY="8E28D5C9EE3B03AB145B4827B534DA9D765CA8D2"
 SECRET_SENTINEL="task3-secret-must-not-leak"
 
 if [[ ! -x "$RELEASE_SCRIPT" ]]; then
@@ -180,7 +180,7 @@ case "$tool" in
     if [[ "${FAKE_IDENTITY_MISSING:-0}" == "1" ]]; then
       echo '  1) BADBADBADBADBADBADBADBADBADBADBADBADBADB "Developer ID Application: Wrong Person (BADTEAM123)"'
     else
-      echo '  1) 325BE7BDA73543F37311F400F231DC751E87FB77 "Developer ID Application: Rafal Sikora (2NY8A789TN)"'
+      echo '  1) 8E28D5C9EE3B03AB145B4827B534DA9D765CA8D2 "Developer ID Application: Rafal Sikora (2NY8A789TN)"'
     fi
     ;;
   xcodebuild)

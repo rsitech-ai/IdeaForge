@@ -59,7 +59,7 @@ The local mode makes no notarization request and omits the secure-timestamp requ
 
 ```bash
 export DEVELOPMENT_TEAM=2NY8A789TN
-export DEVELOPER_ID_APPLICATION=325BE7BDA73543F37311F400F231DC751E87FB77
+export DEVELOPER_ID_APPLICATION=8E28D5C9EE3B03AB145B4827B534DA9D765CA8D2
 export RELEASE_VERSION=0.1.0
 ./script/release_macos.sh --package-only
 ```
@@ -72,7 +72,7 @@ Run this only from the clean, tagged public commit:
 
 ```bash
 export DEVELOPMENT_TEAM=2NY8A789TN
-export DEVELOPER_ID_APPLICATION=325BE7BDA73543F37311F400F231DC751E87FB77
+export DEVELOPER_ID_APPLICATION=8E28D5C9EE3B03AB145B4827B534DA9D765CA8D2
 export RELEASE_VERSION=0.1.0
 export NOTARY_KEYCHAIN_PROFILE=IdeaForgeNotary
 ./script/release_macos.sh --notarize
