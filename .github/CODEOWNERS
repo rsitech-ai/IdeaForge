@@ -1,0 +1,5 @@
+/.github/workflows/ @s1korrrr
+/script/release_macos.sh @s1korrrr
+/script/generate_sbom.py @s1korrrr
+/updates/appcast.xml @s1korrrr
+/Sources/IdeaForgeMac/Info.plist @s1korrrr

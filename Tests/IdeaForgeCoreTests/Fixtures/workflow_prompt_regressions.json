@@ -1,0 +1,174 @@
+[
+  {
+    "id": "prd_backend_prompt_v1",
+    "templateID": "wf_prd",
+    "projectID": "idea_ideaforge",
+    "artifacts": [
+      {
+        "id": "fixture_prd_backend_prompt_v1",
+        "kind": "prd",
+        "title": "PRD: IdeaForge",
+        "markdown": "# PRD: IdeaForge\n\n## Goals\n- Turn voice notes into reviewed product artifacts.\n- Keep the primary path local-first until the user enables backend AI.\n\n## Requirements\n- Preserve transcript, question, artifact, and workflow provenance.\n- Keep workflow output reviewable before build handoff.\n\n## Acceptance Criteria\n- Generated artifacts include acceptance checks before a workflow is accepted.\n- Required schema fields are present in the PRD artifact.\n\n## Validation\n- Evidence comes from the captured IdeaProject assumptions and validation experiments.\n\n## Risks\n- Provider output can drift unless schema and rubric checks stay enforced.\n\n## Next Steps\n- Review blockers and run the production verifier before handoff.",
+        "version": 1,
+        "createdBy": "prompt-regression-fixture",
+        "createdAt": "2026-06-30T10:00:00Z"
+      }
+    ]
+  },
+  {
+    "id": "mvp_planning_backend_prompt_v1",
+    "templateID": "wf_app_idea_mvp",
+    "projectID": "idea_ideaforge",
+    "artifacts": [
+      {
+        "id": "fixture_idea_brief_backend_prompt_v1",
+        "kind": "ideaBrief",
+        "title": "Idea Brief: IdeaForge",
+        "markdown": "# Idea Brief: IdeaForge\n\n## Summary\nIdeaForge turns rough voice notes from Watch, iPhone, or Mac into reviewed planning artifacts that a builder can inspect before implementation.\n\n## Target User\nSolo builders and product operators who capture ideas away from the desk and need a structured first pass before opening an editor.\n\n## Problem\nVoice ideas lose context when they become raw transcripts. The product must preserve the core problem, source evidence, and unresolved blocking questions before any build handoff.\n\n## Next Questions\n- Who is the first user who needs this badly enough to pay?\n- Which privacy mode should be visible before cloud AI is enabled?\n- What evidence proves a Codex-ready packet saves implementation prep time?\n\n## Risks\nProvider output can drift unless every generated artifact remains schema-checked and reviewable.",
+        "version": 1,
+        "createdBy": "prompt-regression-fixture",
+        "createdAt": "2026-07-01T10:00:00Z"
+      },
+      {
+        "id": "fixture_mvp_plan_backend_prompt_v1",
+        "kind": "roadmap",
+        "title": "MVP Roadmap: IdeaForge",
+        "markdown": "# MVP Roadmap: IdeaForge\n\n## Scope\nBuild the smallest local-first loop: capture an idea, preserve transcript context, generate reviewed idea brief, roadmap, and validation plan artifacts, and keep export gated behind user review.\n\n## Sequence\n1. Verify capture and transcript persistence on local sample projects.\n2. Generate schema-backed planning artifacts for the selected IdeaProject.\n3. Review blockers, risks, and validation evidence before export.\n4. Run swift test, the production verifier, and the macOS launch smoke before handoff.\n\n## Risks\n- Cloud AI must stay behind explicit backend and privacy-mode gates.\n- Watch-to-iPhone transfer and background upload still need physical-device proof.\n- Release claims remain blocked until signing and App Store assets exist.\n\n## Next Steps\n- Add provider prompt fixtures for each default planning workflow.\n- Exercise the running Mac and iOS app surfaces after each workflow change.\n- Keep the gap map honest about external blockers.",
+        "version": 1,
+        "createdBy": "prompt-regression-fixture",
+        "createdAt": "2026-07-01T10:00:00Z"
+      },
+      {
+        "id": "fixture_validation_plan_backend_prompt_v1",
+        "kind": "validationPlan",
+        "title": "Validation Plan: IdeaForge",
+        "markdown": "# Validation Plan: IdeaForge\n\n## Assumptions\n- Builders will trust a local-first planning app if cloud AI is explicit and reviewable.\n- Codex packets are more useful than raw transcript exports when they include acceptance checks.\n- Watch capture is valuable only if transfer and retry behavior survive real device conditions.\n\n## Experiments\n- Interview builders who capture ideas while away from their Mac.\n- Compare manual PRD drafting time against the generated planning packet.\n- Run a privacy review that checks logs, exports, and sync conflicts for raw transcript or token leakage.\n\n## Success Metrics\n- At least 7 of 10 builders say the reviewed packet saves 30 or more minutes.\n- Zero provider outputs are accepted when required schema fields are missing.\n- Production verifier, app launch smoke, and privacy-safe log review pass for the slice.\n\n## Risks\n- Physical-device behavior, deployed backend orchestration, and App Store signing remain release blockers until proven with direct evidence.",
+        "version": 1,
+        "createdBy": "prompt-regression-fixture",
+        "createdAt": "2026-07-01T10:00:00Z"
+      }
+    ]
+  },
+  {
+    "id": "codex_handoff_backend_prompt_v1",
+    "templateID": "wf_codex_packet",
+    "projectID": "idea_ideaforge",
+    "artifacts": [
+      {
+        "id": "fixture_codex_packet_backend_prompt_v1",
+        "kind": "codexTaskBundle",
+        "title": "Codex Packet: IdeaForge",
+        "markdown": "# Codex Packet: IdeaForge\n\n## Repo Context\nImplement inside the IdeaForge repository using the existing SwiftPM, XcodeGen, SwiftUI, and IdeaForgeCore service patterns.\n\n## Tasks\n- Inspect current source and docs before editing.\n- Make the smallest production slice that satisfies the reviewed workflow.\n- Preserve privacy gates and avoid external writes without explicit approval.\n\n## Checks\n- Run swift test.\n- Run ./script/verify_production.sh.\n- Run ./script/build_and_run.sh --verify.\n\n## Validation\n- Evidence comes from the current IdeaProject, workflow history, and release checklist.\n\n## Risks\n- Codex execution can mutate local or remote state if approval boundaries are unclear.\n\n## Approval Boundary\nReview before running external tools or making public writes without operator approval.",
+        "version": 1,
+        "createdBy": "prompt-regression-fixture",
+        "createdAt": "2026-06-30T10:00:00Z"
+      },
+      {
+        "id": "fixture_architecture_backend_prompt_v1",
+        "kind": "architecture",
+        "title": "Architecture: IdeaForge",
+        "markdown": "# Architecture: IdeaForge\n\n## Decision\nKeep app behavior in shared IdeaForgeCore services and keep backend AI behind explicit privacy mode and Keychain-backed configuration.\n\n## Components\n- macOS SwiftUI planning studio.\n- iOS bridge and upload queue.\n- watchOS capture shell.\n- Backend AI adapter with output contract validation.\n\n## Risks\n- Provider structured output can drift unless prompt fixtures and runtime contract validation remain enforced.\n- Release claims are blocked until signing, device, and accessibility evidence exists.\n\n## Validation\n- Verify through Swift tests, mock backend self-test, production verifier, and app launch smoke.\n\n## Next Steps\n- Expand live provider structured-output enforcement and prompt regression coverage before enabling real AI broadly.",
+        "version": 1,
+        "createdBy": "prompt-regression-fixture",
+        "createdAt": "2026-06-30T10:00:00Z"
+      }
+    ]
+  },
+  {
+    "id": "full_build_packet_backend_prompt_v1",
+    "templateID": "wf_full_build_packet",
+    "projectID": "idea_ideaforge",
+    "artifacts": [
+      {
+        "id": "fixture_full_idea_brief_backend_prompt_v1",
+        "kind": "ideaBrief",
+        "title": "Idea Brief: IdeaForge",
+        "markdown": "# Idea Brief: IdeaForge\n\n## Summary\nIdeaForge captures raw ideas from Watch, iPhone, or Mac and turns them into reviewed build packets.\n\n## Target User\nSolo builders and product operators who need a structured handoff before implementation.\n\n## Problem\nVoice ideas lose context when they become raw transcript files without reviewable product structure.\n\n## Next Questions\n- Who is the first paying user?\n- Which backend AI gates must be visible before cloud processing?\n- What proof makes the packet ready for build?\n\n## Risks\n- Provider output can drift without schema checks.\n\n## Validation\n- Review against workflow history, assumptions, and production verifier output.",
+        "version": 1,
+        "createdBy": "prompt-regression-fixture",
+        "createdAt": "2026-07-01T12:00:00Z"
+      },
+      {
+        "id": "fixture_full_prd_backend_prompt_v1",
+        "kind": "prd",
+        "title": "PRD: IdeaForge",
+        "markdown": "# PRD: IdeaForge\n\n## Goals\n- Preserve capture context from idea to build packet.\n- Keep backend AI explicit, gated, and reviewable.\n\n## Requirements\n- Store transcript, questions, artifacts, workflow runs, and export state with provenance.\n- Block unreviewed Codex or cloud actions by default.\n\n## Acceptance Criteria\n- Full build packet artifacts validate against required schema fields.\n- Export requires review status and documented checks.\n\n## Risks\n- Physical-device and deployed-backend behavior remain release blockers.\n\n## Next Steps\n- Run production verification and update the readiness label after each slice.",
+        "version": 1,
+        "createdBy": "prompt-regression-fixture",
+        "createdAt": "2026-07-01T12:00:00Z"
+      },
+      {
+        "id": "fixture_full_architecture_backend_prompt_v1",
+        "kind": "architecture",
+        "title": "Architecture: IdeaForge",
+        "markdown": "# Architecture: IdeaForge\n\n## Decision\nKeep product behavior in shared IdeaForgeCore services, with SwiftUI targets consuming the same privacy-safe workflow and sync contracts.\n\n## Components\n- macOS planning studio.\n- iOS capture/review bridge.\n- watchOS capture shell.\n- Backend auth, upload, sync, transcription, workflow, and operations clients behind explicit gates.\n\n## Risks\n- Deployed provider orchestration and App Store signing need direct proof before release claims.\n\n## Validation\n- Verify with Swift tests, mock backend self-test, production verifier, app launch smoke, and log review.",
+        "version": 1,
+        "createdBy": "prompt-regression-fixture",
+        "createdAt": "2026-07-01T12:00:00Z"
+      },
+      {
+        "id": "fixture_full_ux_flow_backend_prompt_v1",
+        "kind": "uxFlow",
+        "title": "UX Flow: IdeaForge",
+        "markdown": "# UX Flow: IdeaForge\n\n## User Journey\n- Capture an idea from Watch, iPhone, or Mac.\n- Review transcript, questions, assumptions, validation, workflow runs, and artifacts.\n- Export a build packet after review.\n\n## Screens\n- Inbox, project overview, transcript, questions, runs, artifacts, Codex handoff, account, and export review.\n\n## States\n- Empty, queued, recording, uploading, failed, offline, permission denied, review needed, and ready-for-build states.\n\n## Edge Cases\n- Interrupted upload, duplicate transfer, sync conflict, revoked permissions, long transcript, and partial workflow failure.\n\n## Validation\n- Exercise the running app after layout or workflow changes.",
+        "version": 1,
+        "createdBy": "prompt-regression-fixture",
+        "createdAt": "2026-07-01T12:00:00Z"
+      },
+      {
+        "id": "fixture_full_data_model_backend_prompt_v1",
+        "kind": "dataModel",
+        "title": "Data Model: IdeaForge",
+        "markdown": "# Data Model: IdeaForge\n\n## Entities\n- IdeaProject, Recording, Transcript, Artifact, WorkflowRun, UploadJob, Question, Assumption, ValidationExperiment, CodexTask, BackendSession, and EntitlementSummary.\n\n## Relationships\n- Projects own recordings, transcript segments, questions, artifacts, assumptions, validation experiments, workflow runs, and Codex tasks.\n\n## Storage\n- Local JSON workspace state, encrypted local audio objects, Keychain secrets, scoped backend objects, and reviewable export files.\n\n## Retention Rules\n- Never delete local audio before confirmed safe state; redact transcript, audio path, token, and credential details from logs.\n\n## Risks\n- Retention and deletion behavior needs physical-device and deployed-backend proof.",
+        "version": 1,
+        "createdBy": "prompt-regression-fixture",
+        "createdAt": "2026-07-01T12:00:00Z"
+      },
+      {
+        "id": "fixture_full_api_design_backend_prompt_v1",
+        "kind": "apiDesign",
+        "title": "API Design: IdeaForge",
+        "markdown": "# API Design: IdeaForge\n\n## Endpoints\n- Account provisioning, auth session validation, signed recording upload, workspace sync, transcription job, workflow execution, account usage, restore drill, and backup manifest.\n\n## Payloads\n- Requests include stable project IDs, upload-job idempotency keys, content length, SHA-256 digests, schema names, review status, and workspace scope.\n\n## Auth Scope\n- Use workspace-bound sessions, Keychain-backed credentials, explicit backend configuration, privacy-mode gates, and entitlement checks.\n\n## Failure Modes\n- Fail closed on digest mismatch, idempotency conflict, missing configuration, revoked credentials, schema mismatch, entitlement exhaustion, and unsafe deletion state.\n\n## Validation\n- Mock backend and provider contract tests must reject malformed responses.",
+        "version": 1,
+        "createdBy": "prompt-regression-fixture",
+        "createdAt": "2026-07-01T12:00:00Z"
+      },
+      {
+        "id": "fixture_full_roadmap_backend_prompt_v1",
+        "kind": "roadmap",
+        "title": "Roadmap: IdeaForge",
+        "markdown": "# Roadmap: IdeaForge\n\n## Scope\n- Productionize capture, local persistence, workflow artifacts, backend seams, sync safety, export review, and release gates.\n\n## Sequence\n1. Keep the gap map and readiness docs current.\n2. Complete schema-backed build packets.\n3. Prove backend/provider orchestration through mock and deployed contracts.\n4. Run physical-device, performance, and App Store signing checks.\n\n## Risks\n- Shipping claims are blocked until deployed backend, device, and signing evidence exist.\n\n## Next Steps\n- Run production verifier and collect runtime screenshots for each UI-facing slice.",
+        "version": 1,
+        "createdBy": "prompt-regression-fixture",
+        "createdAt": "2026-07-01T12:00:00Z"
+      },
+      {
+        "id": "fixture_full_issue_bundle_backend_prompt_v1",
+        "kind": "issueBundle",
+        "title": "Issue Bundle: IdeaForge",
+        "markdown": "# Issue Bundle: IdeaForge\n\n## Issues\n- Build capture reliability, transcription orchestration, workflow execution, sync conflict recovery, export handoff, billing, and release-readiness slices.\n\n## Labels\n- macOS, iOS, watchOS, privacy, backend, workflow, verification, release, and App Store.\n\n## Dependencies\n- Capture and storage precede upload; transcript review precedes artifact export; schema validation precedes Codex handoff; entitlement proof precedes paid AI access.\n\n## Acceptance Checks\n- Run swift test, mock backend self-test, production verifier, macOS launch smoke, iOS UI smoke, release-signing check, and privacy-safe log review.\n\n## Validation\n- Each issue needs an observable command, screenshot, or log artifact.",
+        "version": 1,
+        "createdBy": "prompt-regression-fixture",
+        "createdAt": "2026-07-01T12:00:00Z"
+      },
+      {
+        "id": "fixture_full_codex_packet_backend_prompt_v1",
+        "kind": "codexTaskBundle",
+        "title": "Codex Packet: IdeaForge",
+        "markdown": "# Codex Packet: IdeaForge\n\n## Repo Context\nImplement inside /Users/example/dev/apps/IdeaForge using the existing SwiftPM, XcodeGen, SwiftUI, and IdeaForgeCore service patterns.\n\n## Tasks\n- Inspect current source, docs, and tests before editing.\n- Implement the next production slice without weakening privacy gates.\n- Keep external writes and Codex/GitHub execution behind explicit operator approval.\n\n## Checks\n- Run swift test.\n- Run python3 script/mock_backend.py --self-test.\n- Run ./script/verify_production.sh and ./script/build_and_run.sh --verify.\n\n## Approval Boundary\nNo public writes, store submission, real credentials, or unreviewed external execution without explicit approval.\n\n## Risks\n- Codex task execution can mutate state if approval boundaries drift.",
+        "version": 1,
+        "createdBy": "prompt-regression-fixture",
+        "createdAt": "2026-07-01T12:00:00Z"
+      },
+      {
+        "id": "fixture_full_launch_checklist_backend_prompt_v1",
+        "kind": "launchChecklist",
+        "title": "Launch Checklist: IdeaForge",
+        "markdown": "# Launch Checklist: IdeaForge\n\n## Release Gates\n- Clean tests, production verifier, signing review, package validation, upload readiness, privacy review, and fail-closed external blockers.\n\n## App Store Assets\n- App icon, screenshots, metadata, privacy nutrition labels, support URL, review notes, subscription products, and account-deletion URL.\n\n## Privacy Checks\n- Verify local-first storage, Keychain secrets, redacted logs, explicit backend opt-in, no raw transcript/audio/path/token leakage, and retention behavior.\n\n## Monitoring Checks\n- Confirm telemetry categories, restore drill, backup manifest, upload retry visibility, sync health, crash review, and rollback instructions.\n\n## Next Steps\n- Mark physical-device, deployed-backend, and App Store account checks blocked until direct evidence exists.",
+        "version": 1,
+        "createdBy": "prompt-regression-fixture",
+        "createdAt": "2026-07-01T12:00:00Z"
+      }
+    ]
+  }
+]

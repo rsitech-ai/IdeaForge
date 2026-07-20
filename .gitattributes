@@ -1,0 +1,8 @@
+* text=auto eol=lf
+*.png binary
+*.icns binary
+*.plist text eol=lf
+*.swift text eol=lf
+*.py text eol=lf
+*.sh text eol=lf
+ThirdPartyLicenses/Sparkle-2.9.4-LICENSE.txt text eol=lf whitespace=-trailing-space
