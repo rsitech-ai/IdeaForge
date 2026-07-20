@@ -9,6 +9,9 @@ project, and use the name as reasonably necessary to describe compatibility or
 origin. You may not present a modified build, update feed, download page, or
 service as official, endorsed, or published by the IdeaForge maintainer.
 
+RSI Tech is the public maintainer and official publisher for IdeaForge. Rafal
+Sikora is the copyright owner identified in `NOTICE`.
+
 Forks that are distributed to other people must make their independence clear.
 They should use a distinct product name and icon and must use their own bundle
 identifiers, signing identity, update feed, and update-signing key. References

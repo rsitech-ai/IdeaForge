@@ -7,11 +7,12 @@ Evidence must refer to the exact source commit and tag.
 
 - [ ] Confirm the 36 entries in `ASSET_PROVENANCE.md` were created by or for the
       owner and may be redistributed under Apache-2.0.
-- [ ] Confirm `NOTICE`, Apache-2.0 licensing, and `TRADEMARKS.md` express the
-      intended public grant and mark restrictions.
-- [ ] Confirm GitHub private vulnerability reporting is an acceptable
-      confidential Code of Conduct enforcement channel, or provide another
-      maintained private contact.
+- [x] `NOTICE`, Apache-2.0 licensing, and `TRADEMARKS.md` identify Rafal Sikora
+      as copyright owner and express the intended public grant and mark
+      restrictions.
+- [x] RSI Tech maintains the project and `info@rsitech.ai` is the public and
+      confidential project and Code of Conduct contact, with GitHub private
+      vulnerability reporting as an additional confidential channel.
 - [x] Use `rsitech-ai/IdeaForge` as the canonical public repository and release
       feed owner.
 - [x] Start the canonical repository from the audited source snapshot with no

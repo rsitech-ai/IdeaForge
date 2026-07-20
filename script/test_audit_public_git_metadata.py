@@ -19,7 +19,7 @@ AUDITOR = SCRIPT_DIR / "audit_public_git_metadata.py"
 class PublicGitMetadataAuditTests(unittest.TestCase):
     def git(self, root: Path, *arguments: str, identity: str = "neutral") -> str:
         if identity == "owner":
-            name, email = "Rafał Sikora", "owner@example.invalid"
+            name, email = "Rafal Sikora", "owner@example.invalid"
         else:
             name, email = "IdeaForge Source Release", "source-release@ideaforge.invalid"
         result = subprocess.run(

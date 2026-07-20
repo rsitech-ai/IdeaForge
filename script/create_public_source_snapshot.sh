@@ -163,12 +163,12 @@ python3 "$STAGING/script/audit_public_source.py" "$STAGING" \
 rm -f "$AUDIT_JSON" "$AUDIT_MARKDOWN"
 
 # Auditing must complete before this point. The public repository intentionally
-# uses a new non-personal identity and contains none of the source Git objects.
+# uses the approved public noreply identity and contains none of the source Git objects.
 git -c init.templateDir= -C "$STAGING" init -b main >/dev/null
-git -C "$STAGING" config user.name "IdeaForge Source Release"
-git -C "$STAGING" config user.email "source-release@ideaforge.invalid"
+git -C "$STAGING" config user.name "Rafal Sikora"
+git -C "$STAGING" config user.email "24563931+s1korrrr@users.noreply.github.com"
 git -C "$STAGING" add -A
-git -c commit.gpgsign=false -C "$STAGING" commit --no-gpg-sign -m "Initial public source release" >/dev/null
+git -c commit.gpgsign=false -C "$STAGING" commit --no-gpg-sign --signoff -m "Initial public source release" >/dev/null
 
 PUBLIC_COMMIT="$(git -C "$STAGING" rev-parse HEAD)"
 mv "$STAGING" "$DESTINATION"

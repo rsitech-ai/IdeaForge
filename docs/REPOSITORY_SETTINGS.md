@@ -50,8 +50,9 @@ also configured.
 ## Repository identity
 
 `rsitech-ai/IdeaForge` is the canonical source, issue, update, and release
-location. The founder account remains a maintainer and CODEOWNER; personal
-repository history is not part of the canonical release history.
+location. RSI Tech is the public maintainer; Rafal Sikora is the copyright
+owner and the founder account remains a CODEOWNER. Personal repository history
+is not part of the canonical release history.
 
 Use `https://rsitech.ai` as the repository homepage. Labels, social preview,
 profile README, and profile pins are useful polish, but they are not
