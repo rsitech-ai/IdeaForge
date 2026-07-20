@@ -208,7 +208,7 @@ def run_self_test() -> None:
         "Authorization: Bearer dev-token-secret",
         "Saved object at /Users/example/private/audio.m4a",
         "cleanText: Mock transcript fixture.",
-        "APNs token: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "APNs token: " + (("01234567" + "89abcdef") * 4),
         "Backend URL https://example.invalid/v1/workspace/snapshot",
         "support email user@example.com",
         "audio/idea_ideaforge/rec_watch_1.m4a",
