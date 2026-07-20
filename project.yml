@@ -30,6 +30,7 @@ targets:
       - path: THIRD_PARTY_NOTICES.md
         buildPhase: resources
       - path: ThirdPartyLicenses
+        type: folder
         buildPhase: resources
     dependencies:
       - package: Sparkle
