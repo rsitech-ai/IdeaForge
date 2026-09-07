@@ -2,6 +2,7 @@ import Foundation
 
 public enum BackendAuthError: Error, Equatable {
     case invalidResponse
+    case unauthorized
     case requestFailed(String)
 }
 
@@ -10,9 +11,80 @@ public enum BackendAccountProvisioningError: Error, Equatable {
     case requestFailed(String)
 }
 
+public enum LocalBackendPairingError: Error, Equatable {
+    case invalidResponse
+    case rejected(Int)
+}
+
+public struct LocalBackendPairingConfiguration: Equatable, Sendable {
+    public var baseURL: URL
+    public var pairingPath: String
+
+    public init(baseURL: URL, pairingPath: String = "/v1/local/pair") {
+        self.baseURL = baseURL
+        self.pairingPath = pairingPath
+    }
+
+    public var pairingURL: URL {
+        let path = pairingPath.hasPrefix("/") ? String(pairingPath.dropFirst()) : pairingPath
+        return baseURL.appendingPathComponent(path)
+    }
+}
+
+public struct LocalBackendDeviceCredential: Codable, Equatable, Sendable {
+    public var workspaceID: String
+    public var deviceID: String
+    public var bearerToken: String
+
+    public init(workspaceID: String, deviceID: String, bearerToken: String) {
+        self.workspaceID = workspaceID
+        self.deviceID = deviceID
+        self.bearerToken = bearerToken
+    }
+}
+
+public struct LocalBackendPairingClient: Sendable {
+    public var configuration: LocalBackendPairingConfiguration
+    public var transport: any HTTPRequestTransport
+
+    public init(
+        configuration: LocalBackendPairingConfiguration,
+        transport: any HTTPRequestTransport = URLSessionHTTPRequestTransport()
+    ) {
+        self.configuration = configuration
+        self.transport = transport
+    }
+
+    public func pair(code: String, deviceLabel: String) async throws -> LocalBackendDeviceCredential {
+        guard BackendEndpointPolicy.allowsLocalBackend(configuration.baseURL) else {
+            throw BackendConfigurationError.invalidBaseURL(configuration.baseURL.absoluteString)
+        }
+        var request = URLRequest(url: configuration.pairingURL)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder().encode([
+            "pairingCode": code.trimmingCharacters(in: .whitespacesAndNewlines),
+            "deviceLabel": deviceLabel.trimmingCharacters(in: .whitespacesAndNewlines)
+        ])
+        let (data, response) = try await transport.data(for: request)
+        guard (200..<300).contains(response.statusCode) else {
+            throw LocalBackendPairingError.rejected(response.statusCode)
+        }
+        guard let credential = try? JSONDecoder().decode(LocalBackendDeviceCredential.self, from: data),
+              !credential.workspaceID.isEmpty,
+              !credential.deviceID.isEmpty,
+              !credential.bearerToken.isEmpty else {
+            throw LocalBackendPairingError.invalidResponse
+        }
+        return credential
+    }
+}
+
 public enum BackendAccountCapability: String, Codable, CaseIterable, Identifiable, Equatable, Sendable {
     case uploadRecordings = "upload_recordings"
     case syncWorkspace = "sync_workspace"
+    case processRecordings = "process_recordings"
     case runAIWorkflows = "run_ai_workflows"
     case reconcileBilling = "reconcile_billing"
     case manageAccount = "manage_account"
@@ -24,6 +96,7 @@ public enum BackendAccountCapability: String, Codable, CaseIterable, Identifiabl
         switch self {
         case .uploadRecordings: "Upload recordings"
         case .syncWorkspace: "Sync workspace"
+        case .processRecordings: "Process recordings"
         case .runAIWorkflows: "Run AI workflows"
         case .reconcileBilling: "Reconcile billing"
         case .manageAccount: "Manage account"
@@ -278,6 +351,9 @@ public struct BackendAuthSessionClient: Sendable {
         request.setValue("application/json", forHTTPHeaderField: "Accept")
 
         let (data, response) = try await transport.data(for: request)
+        if response.statusCode == 401 {
+            throw BackendAuthError.unauthorized
+        }
         guard (200..<300).contains(response.statusCode) else {
             throw BackendAuthError.requestFailed("HTTP \(response.statusCode)")
         }

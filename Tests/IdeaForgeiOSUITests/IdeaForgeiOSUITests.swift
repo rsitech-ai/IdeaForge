@@ -21,6 +21,16 @@ final class IdeaForgeiOSUITests: XCTestCase {
             if testName.contains("AccountPublishWorkspaceExplainsCapabilityGate") {
                 application.launchArguments.append("-uiTestingCapabilityGate")
             }
+            if testName.contains("LocalEnrichment") {
+                application.launchArguments.append("-uiTestingLocalEnrichment")
+                application.launchArguments.append("-uiTestingFoundationUnavailable")
+            }
+            if testName.contains("LocalBackend") {
+                application.launchArguments.append("-uiTestingLocalBackend")
+            }
+            if testName.contains("MixedLocalEnrichmentOutcome") {
+                application.launchArguments.append("-uiTestingMixedEnrichmentOutcome")
+            }
             if let fixtureArgument = Self.visualFixtureArgument(for: testName) {
                 application.launchArguments.append(fixtureArgument)
             }
@@ -58,6 +68,7 @@ final class IdeaForgeiOSUITests: XCTestCase {
 
         XCTAssertEqual(elements(identifier: "ios.inbox.statusBanner").count, 1)
         XCTAssertEqual(elements(identifier: "ios.inbox.captureAction").count, 1)
+        XCTAssertEqual(app.buttons["ios.inbox.captureAction"].value as? String, "Ready for local capture")
         XCTAssertTrue(app.descendants(matching: .any)["ios.inbox.recordingList"].exists)
         XCTAssertFalse(app.descendants(matching: .any)["ios.inbox.recordInline"].exists)
         XCTAssertFalse(app.descendants(matching: .any)["ios.syncOverview"].exists)
@@ -183,12 +194,101 @@ final class IdeaForgeiOSUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Open Account"].exists)
         XCTAssertTrue(scrollUntilExists(app.buttons["ios.account.syncOverview.syncWorkspace"]))
         XCTAssertTrue(scrollUntilExists(app.buttons["ios.account.syncOverview.secondary"]))
-        XCTAssertTrue(scrollUntilExists(app.buttons["ios.account.purchasePro"]))
-        XCTAssertTrue(scrollUntilExists(app.buttons["ios.account.restorePurchases"]))
-        XCTAssertTrue(scrollUntilExists(app.buttons["ios.account.refreshUsage"]))
-        XCTAssertTrue(scrollUntilExists(app.buttons["ios.account.validateSession"]))
         XCTAssertTrue(scrollUntilExists(app.buttons["ios.account.processLocalSpeech"]))
-        XCTAssertTrue(scrollUntilExists(app.buttons["ios.account.registerPush"]))
+        XCTAssertTrue(openSubscriptionSettings(in: app.descendants(matching: .any)["ios.account.scroll"]))
+        XCTAssertTrue(scrollUntilExists(purchaseControl()))
+        XCTAssertTrue(scrollUntilExists(app.descendants(matching: .any)["ios.account.restorePurchases.detail"]))
+        XCTAssertTrue(scrollUntilExists(app.buttons["ios.account.refreshUsage.detail"]))
+    }
+
+    func testQuietSignalDoesNotExposeSettingsOrAdminSurfaces() {
+        XCTAssertTrue(app.navigationBars["Recording Inbox"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["ios.inbox.settings"].exists)
+        XCTAssertFalse(app.descendants(matching: .any)["ios.account.backendConnectionKind"].exists)
+        XCTAssertFalse(app.descendants(matching: .any)["ios.account.privacyMode"].exists)
+        XCTAssertFalse(app.buttons["ios.account.processLocalSpeech"].exists)
+        XCTAssertFalse(app.buttons["ios.account.subscriptionSettings"].exists)
+        XCTAssertFalse(app.buttons["ios.account.advancedDiagnostics"].exists)
+        XCTAssertFalse(app.textFields["ios.account.backendWorkspaceID"].exists)
+        XCTAssertFalse(app.staticTexts["GitHub export"].exists)
+        XCTAssertFalse(app.staticTexts["Codex packet export"].exists)
+    }
+
+    func testMacConnectionIsAFocusedPairingFlow() {
+        XCTAssertTrue(app.navigationBars["Recording Inbox"].waitForExistence(timeout: 5))
+        let connect = app.buttons["ios.inbox.connectMac"]
+        XCTAssertTrue(connect.exists)
+        connect.tap()
+
+        XCTAssertTrue(app.navigationBars["Connect to Mac"].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.secureTextFields["ios.macConnection.pairingCode"].exists)
+        XCTAssertTrue(app.buttons["ios.macConnection.pair"].exists)
+        XCTAssertFalse(app.textFields["ios.account.backendWorkspaceID"].exists)
+        XCTAssertFalse(app.textFields["https://api.example.com"].exists)
+    }
+
+    func testInboxOwnsTheWorkFlowAndPullToRefreshRunsFullSync() {
+        XCTAssertTrue(app.navigationBars["Recording Inbox"].waitForExistence(timeout: 5))
+        XCTAssertEqual(app.tabBars.count, 0)
+        XCTAssertFalse(app.buttons["ios.inbox.settings"].exists)
+        XCTAssertTrue(app.descendants(matching: .any)["ios.syncOverview"].exists)
+        XCTAssertFalse(app.buttons["ios.inbox.syncNow"].exists)
+        XCTAssertTrue(app.buttons["ios.inbox.connectMac"].exists)
+        XCTAssertFalse(app.buttons["ios.inbox.processLocalSpeech"].exists)
+
+        let inboxScroll = app.descendants(matching: .any)["ios.inbox.scroll"]
+        let initialStatus = inboxScroll.value as? String
+        let pullStart = inboxScroll.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.18))
+        let pullEnd = inboxScroll.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.82))
+        pullStart.press(forDuration: 0.1, thenDragTo: pullEnd)
+
+        XCTAssertTrue(
+            waitForValueToChange(inboxScroll, from: initialStatus, timeout: 5),
+            "Pull to refresh should run the full all-device sync and publish a visible result"
+        )
+    }
+
+    func testRecordingDetailShowsTruthfulSyncTranscriptAndBasicMetadata() {
+        XCTAssertTrue(app.navigationBars["Recording Inbox"].waitForExistence(timeout: 5))
+        let inboxScroll = app.descendants(matching: .any)["ios.inbox.scroll"]
+        let recording = app.buttons["ios.inbox.recordingRow.rec_watch_2"]
+        XCTAssertTrue(scroll(inboxScroll, until: recording, maxSwipes: 3))
+        recording.tap()
+
+        XCTAssertTrue(app.navigationBars["Recording Details"].waitForExistence(timeout: 3))
+        XCTAssertEqual(app.staticTexts["ios.recordingDetail.title"].label, "IdeaForge")
+        XCTAssertEqual(app.descendants(matching: .any)["ios.recordingDetail.syncStatus"].value as? String, "Waiting for Mac")
+        XCTAssertTrue(app.staticTexts["ios.recordingDetail.transcriptPending"].exists)
+        XCTAssertTrue(app.descendants(matching: .any)["ios.recordingDetail.recordedAt"].exists)
+        XCTAssertEqual(app.descendants(matching: .any)["ios.recordingDetail.duration"].value as? String, "96 seconds")
+        XCTAssertEqual(app.descendants(matching: .any)["ios.recordingDetail.source"].value as? String, "Apple Watch")
+        XCTAssertFalse(app.buttons["ios.recordingDetail.processLocalSpeech"].exists)
+        XCTAssertFalse(app.buttons["ios.recordingDetail.openIdea"].exists)
+    }
+
+    func testCaptureEveryRecordingDetailForDesignReview() {
+        XCTAssertTrue(app.navigationBars["Recording Inbox"].waitForExistence(timeout: 5))
+        let recordings = [
+            (id: "rec_watch_2", name: "watch-follow-up"),
+            (id: "rec_phone_1", name: "private-voice"),
+            (id: "rec_watch_1", name: "watch-original")
+        ]
+
+        for recording in recordings {
+            let inboxScroll = app.descendants(matching: .any)["ios.inbox.scroll"]
+            let row = app.buttons["ios.inbox.recordingRow.\(recording.id)"]
+            XCTAssertTrue(scroll(inboxScroll, until: row, maxSwipes: 5))
+            row.tap()
+            XCTAssertTrue(app.navigationBars["Recording Details"].waitForExistence(timeout: 3))
+
+            attachScreenshot(named: "recording-\(recording.name)-top")
+            let detailList = app.descendants(matching: .any)["ios.recordingDetail.list"]
+            detailList.swipeUp(velocity: .slow)
+            attachScreenshot(named: "recording-\(recording.name)-bottom")
+
+            app.buttons["Done"].tap()
+            XCTAssertTrue(app.navigationBars["Recording Inbox"].waitForExistence(timeout: 3))
+        }
     }
 
     func testRetainedCapabilityReachabilityMatrix() {
@@ -237,21 +337,27 @@ final class IdeaForgeiOSUITests: XCTestCase {
         let publish = app.buttons["ios.account.syncOverview.syncWorkspace"]
         XCTAssertTrue(scroll(accountScroll, until: publish, maxSwipes: 2))
         assertControlAvailability(publish, expectedEnabled: true)
-        let syncReadiness = app.descendants(matching: .any)["ios.syncReadiness"]
-        XCTAssertTrue(syncReadiness.exists)
-        XCTAssertFalse(syncReadiness.label.isEmpty)
-
-        let purchase = app.buttons["ios.account.purchasePro"]
-        XCTAssertTrue(scroll(accountScroll, until: purchase, maxSwipes: 4))
-        assertExplanatoryState(purchase, expectedEnabled: false)
-        assertExplanatoryState(app.buttons["ios.account.restorePurchases"], expectedEnabled: true)
-        assertExplanatoryState(app.buttons["ios.account.refreshUsage"], expectedEnabled: true)
-        assertExplanatoryState(app.buttons["ios.account.validateSession"], expectedEnabled: true)
-        assertExplanatoryState(app.buttons["ios.account.registerPush"], expectedEnabled: true)
+        let syncRoute = app.descendants(matching: .any)["ios.syncRouteSummary"]
+        XCTAssertTrue(syncRoute.exists)
+        XCTAssertEqual(syncRoute.value as? String, "Watch to iPhone to Mac")
 
         let localSpeech = app.buttons["ios.account.processLocalSpeech"]
-        XCTAssertTrue(localSpeech.exists)
+        XCTAssertTrue(scroll(accountScroll, until: localSpeech, maxSwipes: 2))
         assertExplanatoryState(localSpeech, expectedEnabled: true)
+
+        XCTAssertTrue(openSubscriptionSettings(in: accountScroll))
+        let purchase = purchaseControl()
+        XCTAssertTrue(scroll(accountScroll, until: purchase, maxSwipes: 4))
+        // StoreKit product loading is asynchronous: this control may be the
+        // disabled placeholder or an enabled configured product. Both valid
+        // states must remain reachable and explain themselves.
+        XCTAssertTrue(purchase.exists)
+        XCTAssertTrue(purchase.label.contains("Purchase"))
+        let restorePurchases = app.descendants(matching: .any)["ios.account.restorePurchases.detail"]
+        XCTAssertTrue(restorePurchases.exists)
+        XCTAssertTrue(restorePurchases.label.contains("Restore Purchases"))
+        assertControlAvailability(app.buttons["ios.account.refreshUsage.detail"], expectedEnabled: true)
+        XCTAssertTrue(closeSubscriptionSettings())
 
         let remoteUpload = app.switches["ios.account.remoteUpload"]
         XCTAssertTrue(scroll(accountScroll, until: remoteUpload, maxSwipes: 5))
@@ -261,6 +367,7 @@ final class IdeaForgeiOSUITests: XCTestCase {
         remoteUpload.tap()
         XCTAssertTrue(waitForValue(remoteUpload, equalTo: initialRemoteUploadValue ?? "0", timeout: 2))
 
+        XCTAssertTrue(expandAdvancedBackendSettings(in: accountScroll))
         let backendWorkspaceID = app.descendants(matching: .any)["ios.account.backendWorkspaceID"]
         XCTAssertTrue(scroll(accountScroll, until: backendWorkspaceID, maxSwipes: 2))
 
@@ -271,6 +378,7 @@ final class IdeaForgeiOSUITests: XCTestCase {
         let finalBackendCommand = app.buttons["ios.account.registerPush.detail"]
         XCTAssertTrue(scroll(accountScroll, until: finalBackendCommand, maxSwipes: 4))
         assertExplanatoryState(finalBackendCommand, expectedEnabled: true)
+        XCTAssertTrue(closeAdvancedBackendSettings())
 
         let integrations = app.staticTexts["Integrations"]
         XCTAssertTrue(scroll(accountScroll, until: integrations, maxSwipes: 6))
@@ -297,6 +405,41 @@ final class IdeaForgeiOSUITests: XCTestCase {
         XCTAssertFalse((localSpeech.value as? String)?.isEmpty ?? true)
     }
 
+    func testLocalEnrichmentReportsFoundationAvailabilityAndOutcomesSeparately() {
+        XCTAssertTrue(openAccountTab())
+        let accountScroll = app.descendants(matching: .any)["ios.account.scroll"]
+        let localEnrichment = app.buttons["ios.account.processLocalSpeech"]
+        XCTAssertTrue(scroll(accountScroll, until: localEnrichment, maxSwipes: 4))
+
+        XCTAssertTrue(localEnrichment.label.hasPrefix("Enrich Locally"))
+        XCTAssertTrue((localEnrichment.value as? String)?.contains("Transcript: 2 local recordings are ready.") == true)
+        XCTAssertTrue((localEnrichment.value as? String)?.contains("Title: Foundation Models unavailable on this device.") == true)
+
+        localEnrichment.tap()
+
+        let completed = NSPredicate(
+            format: "value CONTAINS %@ AND value CONTAINS %@",
+            "Transcript: 2 ready, 0 need review.",
+            "Title: kept 2 existing titles."
+        )
+        let outcome = expectation(for: completed, evaluatedWith: localEnrichment)
+        wait(for: [outcome], timeout: 8)
+    }
+
+    func testMixedLocalEnrichmentOutcomeShowsExactUnavailableReason() {
+        XCTAssertTrue(openAccountTab())
+        let accountScroll = app.descendants(matching: .any)["ios.account.scroll"]
+        let localEnrichment = app.buttons["ios.account.processLocalSpeech"]
+        XCTAssertTrue(scroll(accountScroll, until: localEnrichment, maxSwipes: 4))
+
+        let exactReason = NSPredicate(
+            format: "value CONTAINS %@ AND value CONTAINS %@",
+            "Title: 1 generated",
+            "turn on Apple Intelligence: 1"
+        )
+        wait(for: [expectation(for: exactReason, evaluatedWith: localEnrichment)], timeout: 5)
+    }
+
     func testRecoveredRecordingCheckpointReturnsToInboxAfterRelaunch() {
         let alert = app.alerts["IdeaForge needs attention"]
         XCTAssertTrue(alert.waitForExistence(timeout: 8))
@@ -317,14 +460,19 @@ final class IdeaForgeiOSUITests: XCTestCase {
 
         XCTAssertTrue(openAccountTab())
 
-        XCTAssertTrue(scrollUntilExists(app.buttons["ios.account.purchasePro"]))
-        XCTAssertTrue(scrollUntilExists(app.buttons["ios.account.restorePurchases"]))
         XCTAssertTrue(scrollUntilExists(app.buttons["ios.account.processLocalSpeech"]))
-        XCTAssertTrue(scrollUntilExists(app.descendants(matching: .any)["ios.account.manageSubscription.detail"]))
-        XCTAssertTrue(scrollUntilExists(app.descendants(matching: .any)["ios.account.deleteAccount.detail"]))
+        XCTAssertTrue(openSubscriptionSettings(in: app.descendants(matching: .any)["ios.account.scroll"]))
+        XCTAssertTrue(scrollUntilExists(purchaseControl()))
+        XCTAssertTrue(scrollUntilExists(app.descendants(matching: .any)["ios.account.restorePurchases.detail"]))
+        XCTAssertTrue(scrollUntilExists(app.descendants(matching: .any)["ios.account.manageSubscription.row"]))
+        XCTAssertTrue(scrollUntilExists(app.descendants(matching: .any)["ios.account.deleteAccount.row"]))
+        XCTAssertTrue(closeSubscriptionSettings())
 
         let remoteUploadSwitch = app.switches["ios.account.remoteUpload"]
         XCTAssertTrue(scrollUntilExists(remoteUploadSwitch))
+        let advanced = app.buttons["Advanced Backend Settings"]
+        XCTAssertTrue(scrollUntilExists(advanced))
+        advanced.tap()
         XCTAssertTrue(scrollUntilExists(app.descendants(matching: .any)["ios.account.backendWorkspaceID"]))
         XCTAssertTrue(scrollUntilExists(app.descendants(matching: .any)["ios.account.backendAuthSessionPath"]))
         XCTAssertTrue(scrollUntilExists(app.descendants(matching: .any)["ios.account.backendPushRegistrationPath"]))
@@ -335,6 +483,41 @@ final class IdeaForgeiOSUITests: XCTestCase {
         XCTAssertTrue(scrollUntilExists(app.buttons["ios.account.validateSession.detail"]))
         XCTAssertTrue(scrollUntilExists(app.buttons["ios.account.processAI"]))
         XCTAssertTrue(scrollUntilExists(app.buttons["ios.account.registerPush.detail"]))
+    }
+
+    func testLocalBackendModeExposesPairingAndLocalOnlyCopy() {
+        XCTAssertTrue(openAccountTab())
+        let accountScroll = app.scrollViews["ios.account.scroll"]
+        let pairingCode = app.secureTextFields["ios.account.localBackendPairingCode"]
+        XCTAssertTrue(scroll(accountScroll, until: pairingCode, maxSwipes: 8))
+        XCTAssertTrue(app.buttons["ios.account.pairLocalBackend"].exists)
+        XCTAssertTrue(app.descendants(matching: .any)["ios.account.backendConnectionKind"].exists)
+        let localOnlyCopy = app.staticTexts["Private-LAN sync only. OpenAI is never used as a fallback."]
+        XCTAssertTrue(scroll(accountScroll, until: localOnlyCopy, maxSwipes: 3))
+    }
+
+    func testLocalBackendAccountPrioritizesWorkflowAndMovesAdvancedSettingsOffMainSurface() {
+        XCTAssertTrue(openAccountTab())
+        let accountScroll = app.scrollViews["ios.account.scroll"]
+
+        let enrichment = app.buttons["ios.account.processLocalSpeech"]
+        XCTAssertTrue(scroll(accountScroll, until: enrichment, maxSwipes: 3))
+        XCTAssertEqual(enrichment.label, "Transcribe and Title")
+
+        let pairing = app.secureTextFields["ios.account.localBackendPairingCode"]
+        XCTAssertTrue(scroll(accountScroll, until: pairing, maxSwipes: 3))
+
+        let advanced = app.buttons["Advanced Backend Settings"]
+        XCTAssertTrue(scroll(accountScroll, until: advanced, maxSwipes: 16))
+        XCTAssertFalse(app.descendants(matching: .any)["ios.account.backendWorkspaceID"].exists)
+        let accountAttachment = XCTAttachment(screenshot: app.screenshot())
+        accountAttachment.name = "Local Backend Account"
+        accountAttachment.lifetime = .keepAlways
+        add(accountAttachment)
+
+        advanced.tap()
+        XCTAssertTrue(app.navigationBars["Backend Settings"].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.descendants(matching: .any)["ios.account.backendWorkspaceID"].waitForExistence(timeout: 2))
     }
 
     func testAccountSyncStateMatrixShowsPublishedAndLocalOnlyHandoffCopy() {
@@ -396,9 +579,10 @@ final class IdeaForgeiOSUITests: XCTestCase {
         XCTAssertTrue(scrollUntilExists(app.descendants(matching: .any)["ios.syncLastActivity"]))
         XCTAssertTrue(scrollUntilExists(app.buttons["ios.account.syncOverview.syncWorkspace"]))
         XCTAssertTrue(scrollUntilExists(app.buttons["ios.account.syncOverview.secondary"]))
-        XCTAssertTrue(scrollUntilExists(app.buttons["ios.account.purchasePro"]))
+        XCTAssertTrue(openSubscriptionSettings(in: app.descendants(matching: .any)["ios.account.scroll"]))
+        XCTAssertTrue(scrollUntilExists(purchaseControl()))
+        XCTAssertTrue(closeSubscriptionSettings())
         XCTAssertTrue(scrollUntilExists(app.buttons["ios.account.processLocalSpeech"]))
-        XCTAssertTrue(scrollUntilExists(app.buttons["ios.account.registerPush"]))
     }
 
     private func assertTaskFirstVisualEvidence(
@@ -471,7 +655,7 @@ final class IdeaForgeiOSUITests: XCTestCase {
             ("Inbox tab", app.tabBars.buttons["Inbox"]),
             ("Ideas tab", app.tabBars.buttons["Ideas"]),
             ("Questions tab", app.tabBars.buttons["Questions"]),
-            ("Account tab", app.tabBars.buttons["Account"]),
+            ("Settings tab", app.tabBars.buttons["Settings"]),
         ]
         for (name, element) in geometryElements {
             XCTAssertTrue(element.exists, "Missing visual geometry element: \(name)")
@@ -601,10 +785,12 @@ final class IdeaForgeiOSUITests: XCTestCase {
         XCTAssertTrue(scrollUntilExists(publishButton))
         publishButton.tap()
 
+        let syncOverview = app.descendants(matching: .any)["ios.syncOverview"]
+        let expectedMessage = "Workspace sync needs validated backend capability. Validate backend session before using this backend action."
+        XCTAssertTrue(syncOverview.waitForExistence(timeout: 2))
         XCTAssertTrue(
-            scrollUntilExists(
-                app.staticTexts["Workspace sync needs validated backend capability. Validate backend session before using this backend action."]
-            )
+            (syncOverview.value as? String)?.contains(expectedMessage) == true,
+            "Unexpected sync status: \(String(describing: syncOverview.value))"
         )
     }
 
@@ -688,7 +874,7 @@ final class IdeaForgeiOSUITests: XCTestCase {
         XCTAssertTrue(app.navigationBars["Recording Inbox"].waitForExistence(timeout: 5))
 
         app.buttons["Review"].tap()
-        XCTAssertTrue(app.navigationBars["Account"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.navigationBars["Sync & Settings"].waitForExistence(timeout: 5))
         let diagnostic = app.descendants(matching: .any)["ios.account.failedUpload.rec_task_first_upload"]
         XCTAssertTrue(scrollUntilExists(diagnostic))
         XCTAssertTrue(diagnostic.label.contains("Task-first fixture"))
@@ -735,11 +921,28 @@ final class IdeaForgeiOSUITests: XCTestCase {
         XCTAssertFalse(app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "retained-audio.m4a")).firstMatch.exists)
     }
 
+    func testNonRetryableTranscriptFailureCanKeepAudioWithoutTranscript() {
+        relaunch(with: ["-uiTestingNonRetryableTranscriptFailure"])
+        XCTAssertTrue(openAccountTab())
+        let accountScroll = app.descendants(matching: .any)["ios.account.scroll"]
+        let keepButton = app.buttons["ios.account.keepWithoutTranscript.rec_nonretryable_transcript"]
+        XCTAssertTrue(scroll(accountScroll, until: keepButton, maxSwipes: 10))
+        XCTAssertTrue(keepButton.isEnabled)
+
+        keepButton.tap()
+        let confirmation = app.buttons["Keep Audio"]
+        XCTAssertTrue(confirmation.waitForExistence(timeout: 5))
+        confirmation.tap()
+
+        XCTAssertFalse(keepButton.waitForExistence(timeout: 2))
+        XCTAssertFalse(app.staticTexts["Upload Diagnostics"].exists)
+    }
+
     func testAccountUploadDiagnosticsExposeOneCurrentRowPerRecording() {
         relaunch(with: ["-uiTestingFailedUpload"])
         XCTAssertTrue(app.navigationBars["Recording Inbox"].waitForExistence(timeout: 5))
         app.buttons["Review"].tap()
-        XCTAssertTrue(app.navigationBars["Account"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.navigationBars["Sync & Settings"].waitForExistence(timeout: 5))
 
         let expectations = [
             ("ios.account.failedUpload.rec_task_first_upload", "Status Failed", "Reason Server"),
@@ -910,15 +1113,22 @@ final class IdeaForgeiOSUITests: XCTestCase {
         return false
     }
 
+    private func attachScreenshot(named name: String) {
+        let attachment = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
     private func openAccountTab() -> Bool {
         if accountSurfaceIsVisible() {
             return true
         }
 
         for _ in 0..<3 {
-            let accountTab = app.tabBars.buttons["Account"]
-            if accountTab.waitForExistence(timeout: 2) {
-                accountTab.tap()
+            let settingsButton = app.buttons["ios.inbox.settings"]
+            if settingsButton.waitForExistence(timeout: 2) {
+                settingsButton.tap()
             } else {
                 continue
             }
@@ -957,10 +1167,49 @@ final class IdeaForgeiOSUITests: XCTestCase {
     }
 
     private func accountSurfaceIsVisible() -> Bool {
-        app.navigationBars["Account"].waitForExistence(timeout: 1)
-            || app.buttons["ios.account.syncOverview.syncWorkspace"].waitForExistence(timeout: 1)
-            || app.buttons["ios.account.purchasePro"].waitForExistence(timeout: 1)
+        app.navigationBars["Settings"].waitForExistence(timeout: 1)
+            || app.descendants(matching: .any)["ios.account.backendConnectionKind"].waitForExistence(timeout: 1)
             || app.descendants(matching: .any)["ios.account.syncConflictReview"].waitForExistence(timeout: 1)
+    }
+
+    private func expandAdvancedBackendSettings(in accountScroll: XCUIElement) -> Bool {
+        let workspaceID = app.descendants(matching: .any)["ios.account.backendWorkspaceID"]
+        if workspaceID.exists {
+            return true
+        }
+        let advanced = app.buttons["Advanced Backend Settings"]
+        guard scroll(accountScroll, until: advanced, maxSwipes: 18) else {
+            return false
+        }
+        advanced.tap()
+        return workspaceID.waitForExistence(timeout: 2)
+    }
+
+    private func openSubscriptionSettings(in accountScroll: XCUIElement) -> Bool {
+        let subscription = app.buttons["ios.account.subscriptionSettings"]
+        guard scroll(accountScroll, until: subscription, maxSwipes: 10) else {
+            return false
+        }
+        subscription.tap()
+        return app.navigationBars["Subscription"].waitForExistence(timeout: 3)
+    }
+
+    private func closeSubscriptionSettings() -> Bool {
+        let accountBackButton = app.navigationBars["Subscription"].buttons["Sync & Settings"]
+        guard accountBackButton.waitForExistence(timeout: 2) else {
+            return false
+        }
+        accountBackButton.tap()
+        return app.navigationBars["Sync & Settings"].waitForExistence(timeout: 3)
+    }
+
+    private func closeAdvancedBackendSettings() -> Bool {
+        let accountBackButton = app.navigationBars["Advanced Diagnostics"].buttons["Sync & Settings"]
+        guard accountBackButton.waitForExistence(timeout: 2) else {
+            return false
+        }
+        accountBackButton.tap()
+        return app.navigationBars["Sync & Settings"].waitForExistence(timeout: 3)
     }
 
     private func relaunch(with extraArguments: [String]) {
@@ -971,6 +1220,18 @@ final class IdeaForgeiOSUITests: XCTestCase {
 
     private func elements(identifier: String) -> XCUIElementQuery {
         app.descendants(matching: .any).matching(identifier: identifier)
+    }
+
+    private func purchaseControl() -> XCUIElement {
+        app.descendants(matching: .any)
+            .matching(
+                NSPredicate(
+                    format: "identifier == %@ OR identifier BEGINSWITH %@",
+                    "ios.account.purchasePro.detail",
+                    "ios.account.purchase."
+                )
+            )
+            .firstMatch
     }
 
     private func waitForValue(_ element: XCUIElement, equalTo expectedValue: String, timeout: TimeInterval) -> Bool {

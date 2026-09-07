@@ -2,6 +2,106 @@ import AVFoundation
 import XCTest
 @testable import IdeaForgeCore
 
+final class WatchCaptureRelayPolicyTests: XCTestCase {
+    func testRelayStateUsesDurableRecordingTruthAfterRelaunch() {
+        XCTAssertEqual(
+            WatchCaptureRelayPolicy.state(
+                isRecording: false,
+                transientTransferStatus: .unavailable,
+                recordings: []
+            ),
+            .ready
+        )
+        XCTAssertEqual(relayState(syncStatus: .pending), .queued)
+        XCTAssertEqual(relayState(syncStatus: .failed), .failed)
+        XCTAssertEqual(relayState(syncStatus: .transferredToIPhone), .received)
+        XCTAssertEqual(relayState(syncStatus: .uploaded), .received)
+        XCTAssertEqual(relayState(syncStatus: .transcribing), .received)
+        XCTAssertEqual(relayState(syncStatus: .ready), .received)
+    }
+
+    func testRelayStatePrioritizesLiveAndTransientTransferEvents() {
+        let pending = recording(syncStatus: .pending)
+        XCTAssertEqual(
+            WatchCaptureRelayPolicy.state(
+                isRecording: true,
+                transientTransferStatus: .failed,
+                recordings: [pending]
+            ),
+            .recording
+        )
+        XCTAssertEqual(
+            WatchCaptureRelayPolicy.state(
+                isRecording: false,
+                transientTransferStatus: .received,
+                recordings: [pending]
+            ),
+            .queued
+        )
+        XCTAssertEqual(
+            WatchCaptureRelayPolicy.state(
+                isRecording: false,
+                transientTransferStatus: .failed,
+                recordings: [pending]
+            ),
+            .failed
+        )
+    }
+
+    func testRelayStatePrioritizesUnresolvedWatchRecordingsAndIgnoresOtherDevices() {
+        let olderFailed = recording(id: "older", syncStatus: .failed, createdAt: Date(timeIntervalSince1970: 1))
+        let newerReceived = recording(id: "newer", syncStatus: .transferredToIPhone, createdAt: Date(timeIntervalSince1970: 2))
+        var phone = recording(id: "phone", syncStatus: .failed, createdAt: Date(timeIntervalSince1970: 3))
+        phone.deviceName = "iPhone"
+
+        XCTAssertEqual(
+            WatchCaptureRelayPolicy.state(
+                isRecording: false,
+                transientTransferStatus: .unavailable,
+                recordings: [olderFailed, newerReceived, phone]
+            ),
+            .failed
+        )
+
+        var olderPending = olderFailed
+        olderPending.syncStatus = .pending
+        XCTAssertEqual(
+            WatchCaptureRelayPolicy.state(
+                isRecording: false,
+                transientTransferStatus: .received,
+                recordings: [olderPending, newerReceived, phone]
+            ),
+            .queued
+        )
+    }
+
+    private func relayState(syncStatus: SyncStatus) -> WatchCaptureRelayState {
+        WatchCaptureRelayPolicy.state(
+            isRecording: false,
+            transientTransferStatus: .unavailable,
+            recordings: [recording(syncStatus: syncStatus)]
+        )
+    }
+
+    private func recording(
+        id: String = "watch-recording",
+        syncStatus: SyncStatus,
+        createdAt: Date = Date(timeIntervalSince1970: 1)
+    ) -> Recording {
+        Recording(
+            id: id,
+            ideaProjectID: "idea",
+            deviceName: "Apple Watch",
+            durationSeconds: 12,
+            localFileStatus: .available,
+            syncStatus: syncStatus,
+            languageHint: "en",
+            createdAt: createdAt,
+            markerOffsets: []
+        )
+    }
+}
+
 private struct FixedStorageCapacityChecker: StorageCapacityChecking {
     var availableBytes: Int64
 
@@ -16,6 +116,10 @@ private struct FixedAudioRecordingPermissionClient: AudioRecordingPermissionChec
     func requestRecordPermission() async -> Bool {
         isGranted
     }
+}
+
+private enum FixedTitleGenerationFailure: Error, Equatable {
+    case failed
 }
 
 private final class TrackingStorageCapacityChecker: StorageCapacityChecking, @unchecked Sendable {
@@ -37,6 +141,246 @@ private final class TrackingStorageCapacityChecker: StorageCapacityChecking, @un
 }
 
 final class IdeaForgeCoreTests: XCTestCase {
+    func testTitleGenerationBoundsLongMultilingualInputWithoutLosingItsEnds() async throws {
+        let generator = SystemFoundationTitleGenerator(
+            availability: { _ in .available },
+            generation: { request in
+                guard request.transcript.utf8.count <= 2_048,
+                      request.transcript.hasPrefix("Garden journal"),
+                      request.transcript.hasSuffix("Watering reminders"),
+                      !request.transcript.contains("\u{fffd}") else {
+                    throw FixedTitleGenerationFailure.failed
+                }
+                return "Garden Journal"
+            }
+        )
+        let transcript = "Garden journal " + String(repeating: "🌱植物 podlewanie ", count: 5_000)
+            + " Watering reminders"
+        let result = try await generator.generateTitle(for: IdeaTitleGenerationRequest(
+            transcript: transcript, currentTitle: "Watch Idea", localeIdentifier: "en"
+        ))
+        XCTAssertEqual(result.title, "Garden Journal")
+        XCTAssertGreaterThan(transcript.utf8.count, 50_000)
+    }
+
+    func testSystemFoundationTitleGeneratorReportsInjectedAvailabilityStates() async {
+        let states: [IdeaTitleGenerationAvailability] = [
+            .available,
+            .deviceNotEligible,
+            .appleIntelligenceNotEnabled,
+            .modelNotReady,
+            .unsupportedLocale,
+            .frameworkUnavailable,
+            .operatingSystemUnsupported
+        ]
+
+        for state in states {
+            let generator = SystemFoundationTitleGenerator(
+                availability: { _ in state },
+                generation: { _ in "Generated title" }
+            )
+
+            let availability = await generator.availability(for: "en-US")
+
+            XCTAssertEqual(availability, state)
+        }
+    }
+
+    func testSystemFoundationTitleGeneratorMapsUnavailableStatesToExplicitErrors() async {
+        let expectations: [(IdeaTitleGenerationAvailability, FoundationTitleGenerationError)] = [
+            (.deviceNotEligible, .deviceNotEligible),
+            (.appleIntelligenceNotEnabled, .appleIntelligenceNotEnabled),
+            (.modelNotReady, .modelNotReady),
+            (.unsupportedLocale, .unsupportedLocale),
+            (.frameworkUnavailable, .frameworkUnavailable),
+            (.operatingSystemUnsupported, .operatingSystemUnsupported)
+        ]
+        let request = IdeaTitleGenerationRequest(
+            transcript: "A private voice inbox for product ideas.",
+            currentTitle: "Watch Idea",
+            localeIdentifier: "en-US"
+        )
+
+        for (state, expectedError) in expectations {
+            let generator = SystemFoundationTitleGenerator(
+                availability: { _ in state },
+                generation: { _ in "This must not be used" }
+            )
+
+            do {
+                _ = try await generator.generateTitle(for: request)
+                XCTFail("Expected \(state) to prevent generation.")
+            } catch let error as FoundationTitleGenerationError {
+                XCTAssertEqual(error, expectedError)
+            } catch {
+                XCTFail("Expected FoundationTitleGenerationError, got \(error).")
+            }
+        }
+    }
+
+    func testSystemFoundationTitleGeneratorNormalizesGeneratedTitle() async throws {
+        let request = IdeaTitleGenerationRequest(
+            transcript: "A private voice inbox for product ideas.",
+            currentTitle: "Watch Idea",
+            localeIdentifier: "en-US"
+        )
+        let generator = SystemFoundationTitleGenerator(
+            availability: { _ in .available },
+            generation: { receivedRequest in
+                guard receivedRequest == request else {
+                    throw FixedTitleGenerationFailure.failed
+                }
+                return "  Private\nvoice idea inbox  "
+            }
+        )
+
+        let result = try await generator.generateTitle(for: request)
+
+        XCTAssertEqual(result, IdeaTitleGenerationResult(
+            title: "Private voice idea inbox", providerIdentifier: "apple.foundation-models"
+        ))
+    }
+
+    func testSystemFoundationTitleGeneratorRejectsInvalidGeneratedTitle() async {
+        let generator = SystemFoundationTitleGenerator(
+            availability: { _ in .available },
+            generation: { _ in " \n\t " }
+        )
+        let request = IdeaTitleGenerationRequest(
+            transcript: "A private voice inbox for product ideas.",
+            currentTitle: "Watch Idea",
+            localeIdentifier: "en-US"
+        )
+
+        do {
+            _ = try await generator.generateTitle(for: request)
+            XCTFail("Expected blank structured output to be rejected.")
+        } catch let error as FoundationTitleGenerationError {
+            XCTAssertEqual(error, .invalidGeneratedTitle)
+        } catch {
+            XCTFail("Expected FoundationTitleGenerationError, got \(error).")
+        }
+    }
+
+    func testSystemFoundationTitleGeneratorPreservesGenerationErrors() async {
+        let generator = SystemFoundationTitleGenerator(
+            availability: { _ in .available },
+            generation: { _ in throw FixedTitleGenerationFailure.failed }
+        )
+        let request = IdeaTitleGenerationRequest(
+            transcript: "A private voice inbox for product ideas.",
+            currentTitle: "Watch Idea",
+            localeIdentifier: "en-US"
+        )
+
+        do {
+            _ = try await generator.generateTitle(for: request)
+            XCTFail("Expected generation failure to propagate.")
+        } catch let error as FixedTitleGenerationFailure {
+            XCTAssertEqual(error, .failed)
+        } catch {
+            XCTFail("Expected the original generation error, got \(error).")
+        }
+    }
+
+    func testTitlePolicyCollapsesGeneratedWhitespace() {
+        let title = IdeaTitlePolicy.normalizedGeneratedTitle(
+            "  Build\n\n a\tprivate  recording inbox  ",
+            currentTitle: "Watch Idea"
+        )
+
+        XCTAssertEqual(title, "Build a private recording inbox")
+    }
+
+    func testTitlePolicyRejectsBlankGeneratedOutput() {
+        XCTAssertNil(
+            IdeaTitlePolicy.normalizedGeneratedTitle(
+                " \n\t ",
+                currentTitle: "Watch Idea"
+            )
+        )
+    }
+
+    func testTitlePolicyTruncatesGeneratedTitleAtWordBoundary() {
+        let title = IdeaTitlePolicy.normalizedGeneratedTitle(
+            "Build a local-first voice capture workspace that keeps private ideas synced safely",
+            currentTitle: "Quick captured idea"
+        )
+
+        XCTAssertEqual(title, "Build a local-first voice capture workspace that keeps private ideas synced")
+    }
+
+    func testTitlePolicyKeepsACompleteWordThatEndsAtCharacterEighty() {
+        let eightyCharacterTitle = String(repeating: "a", count: 74) + " final"
+        let title = IdeaTitlePolicy.normalizedGeneratedTitle(
+            eightyCharacterTitle + " next",
+            currentTitle: "Watch Idea"
+        )
+
+        XCTAssertEqual(title, eightyCharacterTitle)
+        XCTAssertEqual(title?.count, 80)
+    }
+
+    func testTitlePolicyTruncatesCrossingWordAtEightyCharacters() {
+        let wordBoundaryTitle = String(repeating: "a", count: 75)
+        let crossingWordTitle = wordBoundaryTitle + " abcdef"
+
+        XCTAssertEqual(
+            IdeaTitlePolicy.normalizedGeneratedTitle(crossingWordTitle, currentTitle: "Watch Idea"),
+            wordBoundaryTitle
+        )
+    }
+
+    func testTitlePolicyTruncatesOverlongSingleWordAtEightyCharacters() {
+        let overlongSingleWord = String(repeating: "b", count: 81)
+
+        XCTAssertEqual(
+            IdeaTitlePolicy.normalizedGeneratedTitle(overlongSingleWord, currentTitle: "Watch Idea"),
+            String(repeating: "b", count: 80)
+        )
+    }
+
+    func testTitlePolicyKeepsTitlesAtEightyCharactersUnchanged() {
+        let exactlyEightyCharacters = String(repeating: "a", count: 80)
+
+        XCTAssertEqual(
+            IdeaTitlePolicy.normalizedGeneratedTitle(exactlyEightyCharacters, currentTitle: "Watch Idea"),
+            exactlyEightyCharacters
+        )
+    }
+
+    func testTitlePolicyReplacesOnlyExactKnownCapturePlaceholders() {
+        let generatedTitle = "A private idea capture workspace"
+        let exactPlaceholders = [
+            "Watch Idea",
+            "Quick captured idea",
+            "Mac captured idea",
+            "Recovered voice idea",
+            "Untitled Idea"
+        ]
+        let nearMatches = [
+            " Watch Idea",
+            "Watch Idea ",
+            "Watch  Idea",
+            "Watch\nIdea"
+        ]
+
+        for currentTitle in exactPlaceholders {
+            XCTAssertEqual(
+                IdeaTitlePolicy.normalizedGeneratedTitle(generatedTitle, currentTitle: currentTitle),
+                generatedTitle,
+                "Expected exact placeholder to allow replacement: \(currentTitle)"
+            )
+        }
+
+        for currentTitle in nearMatches + ["Founder interview notes"] {
+            XCTAssertNil(
+                IdeaTitlePolicy.normalizedGeneratedTitle(generatedTitle, currentTitle: currentTitle),
+                "Expected non-placeholder title to remain protected: \(currentTitle)"
+            )
+        }
+    }
+
     private static func fixtureAppStoreTransactionJWS(
         productID: String,
         transactionID: String,
@@ -534,6 +878,8 @@ final class IdeaForgeCoreTests: XCTestCase {
         XCTAssertTrue(brief.markdown.contains("Source: Watch"))
         XCTAssertTrue(brief.markdown.contains("Speak an idea into Watch"))
         XCTAssertTrue(brief.markdown.contains("## Questions"))
+        XCTAssertTrue(brief.markdown.contains("## Transcript"))
+        XCTAssertTrue(brief.markdown.contains(project.transcript.cleanText))
         XCTAssertTrue(brief.markdown.contains("Who is the first user who needs this badly enough to pay?"))
         XCTAssertTrue(brief.markdown.contains("Founders who already use Codex for weekend prototypes."))
         XCTAssertTrue(brief.markdown.contains("## Assumptions"))
@@ -659,6 +1005,17 @@ final class IdeaForgeCoreTests: XCTestCase {
             uploadSummary: summary,
             syncConflict: nil,
             watchReachable: true
+        )
+
+        XCTAssertNil(snapshot)
+    }
+
+    func testInboxStatusCanIgnoreDeviceLocalWatchReachability() {
+        let snapshot = InboxStatusSnapshot(
+            uploadSummary: .init(permanentlyFailedCount: 0, queuedCount: 0),
+            syncConflict: nil,
+            watchReachable: false,
+            includesWatchReachability: false
         )
 
         XCTAssertNil(snapshot)
@@ -823,6 +1180,22 @@ final class IdeaForgeCoreTests: XCTestCase {
         XCTAssertEqual(snapshot.durationSeconds, recording.durationSeconds)
         XCTAssertEqual(snapshot.createdAt, recording.createdAt)
         XCTAssertEqual(snapshot.state, .retryScheduled)
+    }
+
+    func testRecordingRowSnapshotLabelsUploadedAudioAsAwaitingTranscript() throws {
+        var recording = try XCTUnwrap(SampleData.ideaForgeProject.recordings.first)
+        recording.syncStatus = .uploaded
+        recording.localFileStatus = .uploaded
+        recording.audioObjectKey = "recordings/remote.m4a"
+
+        let snapshot = RecordingRowSnapshot(
+            recording: recording,
+            projectTitle: "Watch Idea",
+            uploadJob: nil,
+            hasRemoteReceipt: true
+        )
+
+        XCTAssertEqual(snapshot.state.rawValue, "Awaiting transcript")
     }
 
     func testRecordingHistoryBuildsLargeNewestFirstSnapshotFromIndexedJobs() {
@@ -2275,7 +2648,7 @@ final class IdeaForgeCoreTests: XCTestCase {
         )
     }
 
-    func testRecordingTransferReachabilityRequiresActivationCompanionAndLiveReachability() {
+    func testRecordingTransferAvailabilityDoesNotRequireCounterpartAppToBeOpen() {
         XCTAssertTrue(
             RecordingTransferReachabilityPolicy.isReachable(
                 sessionIsActivated: true,
@@ -2297,7 +2670,7 @@ final class IdeaForgeCoreTests: XCTestCase {
                 sessionIsReachable: true
             )
         )
-        XCTAssertFalse(
+        XCTAssertTrue(
             RecordingTransferReachabilityPolicy.isReachable(
                 sessionIsActivated: true,
                 companionIsAvailable: true,
@@ -3209,6 +3582,58 @@ final class IdeaForgeCoreTests: XCTestCase {
     }
 
     @MainActor
+    func testStoreRecoversTransferredAudioAfterAppContainerRelocation() throws {
+        let fixture = try FailedUploadFixture.make(source: .watch)
+        defer { try? fixture.fileManager.removeItem(at: fixture.directory) }
+        let inboxDirectory = fixture.directory
+            .appending(path: "current/Library/Application Support/IdeaForge/Recordings/Transferred", directoryHint: .isDirectory)
+        try fixture.fileManager.createDirectory(at: inboxDirectory, withIntermediateDirectories: true)
+        let relocatedAudioURL = inboxDirectory.appending(path: fixture.audioURL.lastPathComponent)
+        try fixture.fileManager.moveItem(at: fixture.audioURL, to: relocatedAudioURL)
+
+        var staleState = fixture.state
+        let stalePath = "/private/var/mobile/Containers/Data/Application/OLD/Library/Application Support/IdeaForge/Recordings/Transferred/\(fixture.audioURL.lastPathComponent)"
+        staleState.projects[0].recordings[0].localAudioPath = stalePath
+        staleState.uploadJobs[0].localAudioPath = stalePath
+        let repository = InMemoryWorkspaceRepository(state: staleState)
+        let store = IdeaForgeStore(state: staleState, repository: repository)
+
+        XCTAssertEqual(
+            store.recoverRelocatedTransferredRecordingAudio(
+                inboxDirectory: inboxDirectory,
+                fileManager: fixture.fileManager
+            ),
+            1
+        )
+        XCTAssertEqual(store.projects[0].recordings[0].localAudioPath, relocatedAudioURL.path)
+        XCTAssertEqual(store.uploadJobs[0].localAudioPath, relocatedAudioURL.path)
+        XCTAssertEqual(store.projects[0].recordings[0].syncStatus, .failed)
+        XCTAssertEqual(store.uploadJobs[0].status, .permanentlyFailed)
+        XCTAssertTrue(store.canRetryUpload(recordingID: fixture.recordingID, fileManager: fixture.fileManager))
+        XCTAssertEqual(try repository.load(), store.workspaceState())
+    }
+
+    @MainActor
+    func testStoreRetryReconcilesStaleFailureCounterFromRecordingState() throws {
+        let fixture = try FailedUploadFixture.make(source: .watch)
+        defer { try? fixture.fileManager.removeItem(at: fixture.directory) }
+        var staleState = fixture.state
+        staleState.syncHealth.failingItems = 2
+        let repository = InMemoryWorkspaceRepository(state: staleState)
+        let store = IdeaForgeStore(state: staleState, repository: repository)
+
+        XCTAssertTrue(
+            store.retryUpload(
+                recordingID: fixture.recordingID,
+                now: fixture.now.addingTimeInterval(1),
+                fileManager: fixture.fileManager
+            )
+        )
+        XCTAssertEqual(store.syncHealth.failingItems, 0)
+        XCTAssertEqual(try repository.load()?.syncHealth.failingItems, 0)
+    }
+
+    @MainActor
     func testStoreRetryRejectsDirectorySourceWithoutChangingState() throws {
         let fixture = try FailedUploadFixture.make(source: .iphone)
         defer { try? fixture.fileManager.removeItem(at: fixture.directory) }
@@ -3714,6 +4139,101 @@ final class IdeaForgeCoreTests: XCTestCase {
         XCTAssertEqual(settings.normalizedRestoreDrillPath, "/v1/admin/restore-drill")
         XCTAssertEqual(settings.normalizedPushRegistrationPath, "/v1/devices/apns")
         XCTAssertEqual(settings.normalizedWorkspaceID, "")
+        XCTAssertEqual(settings.connectionKind, .remoteService)
+    }
+
+    func testLocalBackendConnectionModeRequiresHTTPSAndAcceptsDotLocalEndpoint() {
+        let local = BackendConnectionSettings(
+            baseURLString: "https://ideaforge-mac.local:8765",
+            workspaceID: "workspace_rsi",
+            isEnabled: true,
+            connectionKind: .localBackend
+        )
+        let plaintext = BackendConnectionSettings(
+            baseURLString: "http://ideaforge-mac.local:8765",
+            workspaceID: "workspace_rsi",
+            isEnabled: true,
+            connectionKind: .localBackend
+        )
+
+        XCTAssertTrue(local.hasValidBaseURL)
+        XCTAssertFalse(plaintext.hasValidBaseURL)
+        XCTAssertEqual(local.connectionKind.label, "Local Backend")
+    }
+
+    func testLocalBackendPairingPostsCodeAndReturnsDeviceCredential() async throws {
+        let response = Data(
+            #"{"workspaceID":"workspace_rsi","deviceID":"device_iphone","bearerToken":"device-secret"}"#.utf8
+        )
+        let transport = CapturingHTTPRequestTransport(responseData: response, statusCode: 201)
+        let client = LocalBackendPairingClient(
+            configuration: LocalBackendPairingConfiguration(
+                baseURL: URL(string: "https://ideaforge-mac.local:8765")!
+            ),
+            transport: transport
+        )
+
+        let credential = try await client.pair(code: "one-time-code", deviceLabel: "Rafal iPhone")
+        let capturedRequest = await transport.capturedRequest()
+        let capturedBody = await transport.capturedBody()
+        let request = try XCTUnwrap(capturedRequest)
+        let body = try XCTUnwrap(capturedBody)
+        let payload = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: String])
+
+        XCTAssertEqual(request.url?.absoluteString, "https://ideaforge-mac.local:8765/v1/local/pair")
+        XCTAssertEqual(request.httpMethod, "POST")
+        XCTAssertEqual(payload["pairingCode"], "one-time-code")
+        XCTAssertEqual(payload["deviceLabel"], "Rafal iPhone")
+        XCTAssertEqual(credential.workspaceID, "workspace_rsi")
+        XCTAssertEqual(credential.deviceID, "device_iphone")
+        XCTAssertEqual(credential.bearerToken, "device-secret")
+    }
+
+    func testConfigurationManagerPersistsLocalPairingAndRotatesDeviceToken() throws {
+        let settingsStore = InMemoryBackendSettingsStore()
+        let credentialStore = InMemoryBackendCredentialStore(token: "old-token")
+        let manager = BackendConfigurationManager(
+            settingsStore: settingsStore,
+            credentialStore: credentialStore
+        )
+        let endpoint = URL(string: "https://ideaforge-mac.local:8765")!
+
+        try manager.saveLocalPairing(
+            baseURL: endpoint,
+            credential: LocalBackendDeviceCredential(
+                workspaceID: "workspace_rsi",
+                deviceID: "device_iphone",
+                bearerToken: "rotated-token"
+            )
+        )
+
+        let settings = try settingsStore.loadSettings()
+        XCTAssertTrue(settings.isEnabled)
+        XCTAssertEqual(settings.connectionKind, .localBackend)
+        XCTAssertEqual(settings.baseURLString, endpoint.absoluteString)
+        XCTAssertEqual(settings.workspaceID, "workspace_rsi")
+        XCTAssertEqual(try credentialStore.loadBearerToken(), "rotated-token")
+    }
+
+    func testBackendSessionMapsRejectedDeviceTokenToUnauthorized() async {
+        let transport = CapturingHTTPRequestTransport(responseData: Data(), statusCode: 401)
+        let client = BackendAuthSessionClient(
+            configuration: BackendAuthConfiguration(
+                baseURL: URL(string: "https://ideaforge-mac.local:8765")!,
+                bearerToken: "revoked-token",
+                workspaceID: "workspace_rsi"
+            ),
+            transport: transport
+        )
+
+        do {
+            _ = try await client.validateSession()
+            XCTFail("Expected a rejected device token.")
+        } catch let error as BackendAuthError {
+            XCTAssertEqual(error, .unauthorized)
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
     }
 
     func testBackendConfigurationManagerResolvesSyncSettings() throws {
@@ -3915,6 +4435,107 @@ final class IdeaForgeCoreTests: XCTestCase {
                 "Speech recognition is not available. Enable speech recognition access and retry."
             )
         }
+    }
+
+    func testLocalSpeechReportsUnsupportedOnDeviceRecognitionWithoutCloudFallback() {
+        let error = LocalSpeechTranscriptionError.onDeviceRecognitionUnavailable
+
+        XCTAssertEqual(
+            error.userFacingMessage,
+            "On-device speech recognition is unavailable for this language or device. No audio was sent to a speech service."
+        )
+    }
+
+    func testLocalEnrichmentRuntimePolicyRequiresBaseUITestingForSpecializedFixtures() {
+        XCTAssertFalse(
+            LocalEnrichmentRuntimePolicy(arguments: ["IdeaForge", "-uiTestingLocalEnrichment"])
+                .usesDeterministicTranscription
+        )
+        XCTAssertFalse(
+            LocalEnrichmentRuntimePolicy(arguments: ["IdeaForge", "-uiTestingFoundationUnavailable"])
+                .usesUnavailableFoundationFixture
+        )
+        XCTAssertTrue(
+            LocalEnrichmentRuntimePolicy(arguments: ["IdeaForge", "-uiTesting", "-uiTestingLocalEnrichment"])
+                .usesDeterministicTranscription
+        )
+        XCTAssertTrue(
+            LocalEnrichmentRuntimePolicy(arguments: ["IdeaForge", "-uiTesting", "-uiTestingFoundationUnavailable"])
+                .usesUnavailableFoundationFixture
+        )
+        XCTAssertTrue(
+            LocalEnrichmentRuntimePolicy(arguments: ["IdeaForge", "-uiTesting", "-uiTestingMixedEnrichmentOutcome"])
+                .usesMixedOutcomeFixture
+        )
+    }
+
+    @MainActor
+    func testLocalEnrichmentStatusGateRejectsAvailabilityResolvedAfterCompletedOutcome() async {
+        let statusGate = LocalEnrichmentStatusGate()
+        let availabilityProbe = BlockingLocalEnrichmentAvailabilityProbe()
+        let availabilityRevision = statusGate.beginAvailabilityCheck()
+        async let availability = availabilityProbe.resolve()
+        await availabilityProbe.waitUntilStarted()
+
+        statusGate.invalidateForEnrichmentOutcome()
+        await availabilityProbe.release()
+        _ = await availability
+
+        var visibleStatus = "Transcript: 2 ready. Title: kept 2 existing titles."
+        if statusGate.canApplyAvailability(from: availabilityRevision) {
+            visibleStatus = "Transcript: ready. Title: Foundation Models unavailable."
+        }
+        XCTAssertEqual(visibleStatus, "Transcript: 2 ready. Title: kept 2 existing titles.")
+    }
+
+    func testLocalEnrichmentPresentationSurfacesReasonInMixedOutcome() {
+        let summary = AIProcessingSummary(
+            attemptedCount: 3,
+            completedCount: 3,
+            failedCount: 0,
+            titleGeneratedCount: 1,
+            titlePreservedCount: 1,
+            titleUnavailableCount: 1,
+            titleUnavailableReasons: [.appleIntelligenceNotEnabled: 1]
+        )
+
+        let message = LocalEnrichmentPresentation.outcomeMessage(summary)
+
+        XCTAssertTrue(message.contains("Title: 1 generated"))
+        XCTAssertTrue(message.contains("1 kept"))
+        XCTAssertTrue(message.contains("turn on Apple Intelligence: 1"))
+    }
+
+    func testLocalEnrichmentPresentationAccountsForEveryCandidateCapability() {
+        let message = LocalEnrichmentPresentation.preflightMessage(
+            availabilities: [.available, .unsupportedLocale],
+            readyLocation: "this device"
+        )
+
+        XCTAssertTrue(message.contains("2 local recordings"))
+        XCTAssertTrue(message.contains("Foundation Models ready: 1"))
+        XCTAssertTrue(message.contains("unsupported recording language: 1"))
+    }
+
+    func testOnDeviceSpeechRequestPolicyRejectsUnsupportedRecognizerAndRequiresLocalProcessing() throws {
+        let unsupportedRequest = StubLocalSpeechRecognitionRequest()
+
+        XCTAssertThrowsError(
+            try OnDeviceSpeechRecognitionRequestPolicy.prepare(
+                request: unsupportedRequest,
+                supportsOnDeviceRecognition: false
+            )
+        ) { error in
+            XCTAssertEqual(error as? LocalSpeechTranscriptionError, .onDeviceRecognitionUnavailable)
+        }
+        XCTAssertFalse(unsupportedRequest.requiresOnDeviceRecognition)
+
+        let supportedRequest = StubLocalSpeechRecognitionRequest()
+        try OnDeviceSpeechRecognitionRequestPolicy.prepare(
+            request: supportedRequest,
+            supportsOnDeviceRecognition: true
+        )
+        XCTAssertTrue(supportedRequest.requiresOnDeviceRecognition)
     }
 
     func testLocalSpeechTranscriptionServiceBuildsTranscriptFromRecognizedAudio() async throws {
@@ -6100,6 +6721,153 @@ final class IdeaForgeCoreTests: XCTestCase {
                 .flatMap(\.recordings)
                 .allSatisfy { $0.localAudioPath == nil }
         )
+    }
+
+    @MainActor
+    func testWorkspaceSyncRoundTripTransfersEnrichedWatchTranscriptAndTitleWithoutDeviceLocalAudioPath() async throws {
+        let capturedAt = Date(timeIntervalSince1970: 20_000)
+        let enrichedAt = Date(timeIntervalSince1970: 20_060)
+        let publishedAt = Date(timeIntervalSince1970: 20_120)
+        let sourceRecording = Recording(
+            id: "rec_watch_enriched_sync",
+            ideaProjectID: "idea_watch_enriched_sync",
+            deviceName: "Apple Watch",
+            durationSeconds: 38,
+            localFileStatus: .available,
+            syncStatus: .transferredToIPhone,
+            localAudioPath: "recordings/watch-enriched-sync.m4a",
+            languageHint: "en-US",
+            createdAt: capturedAt,
+            markerOffsets: []
+        )
+        let sourceProject = IdeaProject(
+            id: "idea_watch_enriched_sync",
+            title: "Watch Idea",
+            status: .inbox,
+            source: .watch,
+            createdAt: capturedAt,
+            updatedAt: capturedAt,
+            summary: "Queued Watch capture.",
+            tags: [.appIdea],
+            score: IdeaScore(confidence: 0.2, completeness: 0.1, risk: 0.7),
+            transcript: Transcript(cleanText: "Queued Watch capture.", segments: [], unclearFragments: []),
+            recordings: [sourceRecording],
+            questions: [],
+            artifacts: [],
+            assumptions: [],
+            validationExperiments: [],
+            codexTasks: []
+        )
+        let sourceState = WorkspaceState(
+            projects: [sourceProject],
+            workflowTemplates: DefaultWorkflows.templates,
+            uploadJobs: [],
+            privacyMode: .standardCloud,
+            syncHealth: SyncHealth(
+                watchReachable: true,
+                queuedUploads: 0,
+                lastSuccessfulSync: capturedAt,
+                failingItems: 0
+            ),
+            selectedProjectID: sourceProject.id,
+            updatedAt: capturedAt
+        )
+        let sourceStore = IdeaForgeStore(
+            state: sourceState,
+            repository: InMemoryWorkspaceRepository(state: sourceState)
+        )
+        let enrichmentServices = IdeaForgeServices(
+            transcription: SucceedingTranscriptionService(
+                transcript: Transcript(
+                    cleanText: "Capture a private offline workflow for research ideas.",
+                    segments: [],
+                    unclearFragments: []
+                )
+            ),
+            titleGeneration: StubTitleGenerator(
+                availability: .available,
+                result: .success(IdeaTitleGenerationResult(title: "Private Research Workflow"))
+            ),
+            workflow: LocalWorkflowExecutionService(),
+            syncQueue: LocalSyncQueueService(),
+            export: LocalExportService()
+        )
+
+        let enrichment = await sourceStore.processLocalRecordingsForSpeechTranscription(
+            services: enrichmentServices,
+            now: enrichedAt
+        )
+        let receipt = WorkspaceSyncPushReceipt(
+            workspaceID: "workspace_alpha",
+            acceptedUpdatedAt: publishedAt
+        )
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let publishTransport = CapturingHTTPRequestTransport(
+            responseData: try encoder.encode(receipt),
+            statusCode: 200
+        )
+        let configuration = BackendSyncConfiguration(
+            baseURL: URL(string: "https://api.example.test")!,
+            bearerToken: "sync-token",
+            workspaceID: "workspace_alpha"
+        )
+        let publishEngine = WorkspaceSyncEngine(
+            client: BackendWorkspaceSyncClient(configuration: configuration, transport: publishTransport)
+        )
+
+        let publication = try await publishEngine.pushLocalSnapshot(
+            from: sourceStore,
+            syncedAt: publishedAt
+        )
+        let capturedOutboundSnapshot = await publishTransport.capturedBody()
+        let outboundSnapshot = try XCTUnwrap(capturedOutboundSnapshot)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let transmittedState = try decoder.decode(WorkspaceState.self, from: outboundSnapshot)
+        let transmittedRecording = try XCTUnwrap(transmittedState.projects.first?.recordings.first)
+        let destinationState = WorkspaceState(
+            projects: [],
+            workflowTemplates: DefaultWorkflows.templates,
+            uploadJobs: [],
+            privacyMode: .standardCloud,
+            syncHealth: SyncHealth(
+                watchReachable: false,
+                queuedUploads: 0,
+                lastSuccessfulSync: capturedAt,
+                failingItems: 0
+            ),
+            selectedProjectID: nil,
+            updatedAt: capturedAt
+        )
+        let destinationStore = IdeaForgeStore(
+            state: destinationState,
+            repository: InMemoryWorkspaceRepository(state: destinationState)
+        )
+        let pullTransport = CapturingHTTPRequestTransport(responseData: outboundSnapshot, statusCode: 200)
+        let pullEngine = WorkspaceSyncEngine(
+            client: BackendWorkspaceSyncClient(configuration: configuration, transport: pullTransport)
+        )
+
+        let hydration = try await pullEngine.pullLatest(
+            into: destinationStore,
+            syncedAt: publishedAt.addingTimeInterval(1)
+        )
+        let hydratedProject = try XCTUnwrap(destinationStore.projects.first)
+        let hydratedRecording = try XCTUnwrap(hydratedProject.recordings.first)
+
+        XCTAssertEqual(enrichment.completedCount, 1)
+        XCTAssertEqual(enrichment.titleGeneratedCount, 1)
+        XCTAssertTrue(publication.pushedLocalSnapshot)
+        XCTAssertTrue(hydration.appliedRemoteSnapshot)
+        XCTAssertEqual(sourceStore.projects.first?.recordings.first?.localAudioPath, "recordings/watch-enriched-sync.m4a")
+        XCTAssertNil(transmittedRecording.localAudioPath)
+        XCTAssertEqual(hydratedProject.title, "Private Research Workflow")
+        XCTAssertEqual(hydratedProject.transcript.cleanText, "Capture a private offline workflow for research ideas.")
+        XCTAssertEqual(hydratedProject.updatedAt, enrichedAt)
+        XCTAssertEqual(destinationStore.updatedAt, enrichedAt)
+        XCTAssertNil(hydratedRecording.localAudioPath)
+        XCTAssertEqual(hydratedRecording.localFileStatus, .missing)
     }
 
     @MainActor
@@ -9805,10 +10573,1018 @@ final class IdeaForgeCoreTests: XCTestCase {
         )
 
         let saved = try XCTUnwrap(try repository.load())
-        XCTAssertEqual(summary, AIProcessingSummary(attemptedCount: 1, completedCount: 1, failedCount: 0))
+        XCTAssertEqual(
+            summary,
+            AIProcessingSummary(attemptedCount: 1, completedCount: 1, failedCount: 0, titlePreservedCount: 1)
+        )
         XCTAssertEqual(saved.projects.first?.summary, "A completed backend transcript.")
         XCTAssertEqual(saved.projects.first?.recordings.first?.syncStatus, .ready)
         XCTAssertEqual(saved.projects.first?.recordings.first?.localFileStatus, .uploaded)
+    }
+
+    @MainActor
+    func testLocalProcessingPersistsGeneratedTitleAndTranscriptInOneRevision() async throws {
+        let now = Date(timeIntervalSince1970: 10_500)
+        let fixture = singleRecordingProcessingFixture(
+            id: "atomic_enrichment",
+            title: "Watch Idea",
+            transcriptText: "A private capture workflow for product ideas.",
+            titleAvailability: .available,
+            titleResult: .success(IdeaTitleGenerationResult(title: "Private Product Idea Capture")),
+            now: now
+        )
+
+        let summary = await fixture.store.processLocalRecordingsForSpeechTranscription(
+            services: fixture.services,
+            now: now.addingTimeInterval(60)
+        )
+
+        let saved = try XCTUnwrap(fixture.repository.state)
+        let savedProject = try XCTUnwrap(saved.projects.first)
+        XCTAssertEqual(summary.completedCount, 1)
+        XCTAssertEqual(summary.titleGeneratedCount, 1)
+        XCTAssertEqual(summary.titlePreservedCount, 0)
+        XCTAssertEqual(summary.titleUnavailableCount, 0)
+        XCTAssertEqual(summary.titleFailedCount, 0)
+        XCTAssertEqual(savedProject.title, "Private Product Idea Capture")
+        XCTAssertEqual(savedProject.transcript.cleanText, "A private capture workflow for product ideas.")
+        XCTAssertEqual(savedProject.recordings.first?.syncStatus, .ready)
+
+        let enrichmentRevisions = fixture.repository.savedStates.filter { state in
+            guard let revision = state.projects.first else { return false }
+            return revision.title == "Private Product Idea Capture"
+                || revision.transcript.cleanText == "A private capture workflow for product ideas."
+        }
+        XCTAssertEqual(enrichmentRevisions.count, 1)
+        XCTAssertEqual(enrichmentRevisions.first?.projects.first?.title, "Private Product Idea Capture")
+        XCTAssertEqual(
+            enrichmentRevisions.first?.projects.first?.transcript.cleanText,
+            "A private capture workflow for product ideas."
+        )
+    }
+
+    @MainActor
+    func testLocalProcessingCanPrioritizeTheFreshlyImportedWatchRecording() async throws {
+        let now = Date(timeIntervalSince1970: 10_550)
+        let olderRecording = processingTestRecording(
+            id: "rec_older_watch",
+            projectID: "idea_older_watch",
+            localFileStatus: .available,
+            syncStatus: .transferredToIPhone,
+            now: now
+        )
+        let freshRecording = processingTestRecording(
+            id: "rec_fresh_watch",
+            projectID: "idea_fresh_watch",
+            localFileStatus: .available,
+            syncStatus: .transferredToIPhone,
+            now: now.addingTimeInterval(1)
+        )
+        let olderProject = processingTestProject(
+            id: olderRecording.ideaProjectID,
+            title: "Older Watch Idea",
+            recordings: [olderRecording],
+            transcript: Transcript(cleanText: "Older placeholder.", segments: [], unclearFragments: []),
+            now: now
+        )
+        let freshProject = processingTestProject(
+            id: freshRecording.ideaProjectID,
+            title: "Watch Idea",
+            recordings: [freshRecording],
+            transcript: Transcript(cleanText: "Fresh placeholder.", segments: [], unclearFragments: []),
+            now: now.addingTimeInterval(1)
+        )
+        let repository = RevisionTrackingWorkspaceRepository()
+        let store = IdeaForgeStore(
+            projects: [olderProject, freshProject],
+            workflowTemplates: DefaultWorkflows.templates,
+            selectedProjectID: freshProject.id,
+            privacyMode: .privateLocal,
+            syncHealth: SyncHealth(
+                watchReachable: true,
+                queuedUploads: 0,
+                lastSuccessfulSync: now,
+                failingItems: 0
+            ),
+            repository: repository
+        )
+        let services = IdeaForgeServices(
+            transcription: RecordingMappedTranscriptionService(
+                transcripts: [
+                    olderRecording.id: Transcript(cleanText: "Older transcript.", segments: [], unclearFragments: []),
+                    freshRecording.id: Transcript(cleanText: "Fresh spoken Watch transcript.", segments: [], unclearFragments: [])
+                ]
+            ),
+            titleGeneration: StubTitleGenerator(
+                availability: .deviceNotEligible,
+                result: .success(IdeaTitleGenerationResult(title: "Unused"))
+            ),
+            workflow: LocalWorkflowExecutionService(),
+            syncQueue: LocalSyncQueueService(),
+            export: LocalExportService()
+        )
+
+        let summary = await store.processLocalRecordingForSpeechTranscription(
+            recordingID: freshRecording.id,
+            services: services,
+            now: now.addingTimeInterval(60)
+        )
+
+        XCTAssertEqual(summary.attemptedCount, 1)
+        XCTAssertEqual(summary.completedCount, 1)
+        XCTAssertEqual(store.projects[0].recordings[0].syncStatus, .transferredToIPhone)
+        XCTAssertEqual(store.projects[0].transcript.cleanText, "Older placeholder.")
+        XCTAssertEqual(store.projects[1].recordings[0].syncStatus, .ready)
+        XCTAssertEqual(store.projects[1].transcript.cleanText, "Fresh spoken Watch transcript.")
+    }
+
+    @MainActor
+    func testLocalProcessingPreservesTitleWhenGenerationIsUnavailable() async throws {
+        let now = Date(timeIntervalSince1970: 10_600)
+        let fixture = singleRecordingProcessingFixture(
+            id: "title_unavailable",
+            title: "Watch Idea",
+            transcriptText: "Transcript survives unavailable title generation.",
+            titleAvailability: .modelNotReady,
+            titleResult: .success(IdeaTitleGenerationResult(title: "Must not be used")),
+            now: now
+        )
+
+        let summary = await fixture.store.processLocalRecordingsForSpeechTranscription(
+            services: fixture.services,
+            now: now.addingTimeInterval(60)
+        )
+
+        let savedProject = try XCTUnwrap(fixture.repository.state?.projects.first)
+        XCTAssertEqual(summary.completedCount, 1)
+        XCTAssertEqual(summary.failedCount, 0)
+        XCTAssertEqual(summary.titleUnavailableCount, 1)
+        XCTAssertEqual(summary.titleFailedCount, 0)
+        XCTAssertEqual(savedProject.title, "Watch Idea")
+        XCTAssertEqual(savedProject.transcript.cleanText, "Transcript survives unavailable title generation.")
+        XCTAssertEqual(savedProject.recordings.first?.syncStatus, .ready)
+        XCTAssertNil(savedProject.recordings.first?.processingDiagnostic)
+    }
+
+    @MainActor
+    func testLocalProcessingPreservesExactFoundationUnavailableReasons() async {
+        let unavailableStates: [IdeaTitleGenerationAvailability] = [
+            .appleIntelligenceNotEnabled,
+            .modelNotReady,
+            .unsupportedLocale
+        ]
+
+        for (index, availability) in unavailableStates.enumerated() {
+            let now = Date(timeIntervalSince1970: 10_625 + Double(index))
+            let fixture = singleRecordingProcessingFixture(
+                id: "exact_unavailable_\(index)",
+                title: "Watch Idea",
+                transcriptText: "Transcript remains successful.",
+                titleAvailability: availability,
+                titleResult: .success(IdeaTitleGenerationResult(title: "Unused")),
+                now: now
+            )
+
+            let summary = await fixture.store.processLocalRecordingsForSpeechTranscription(
+                services: fixture.services,
+                now: now.addingTimeInterval(60)
+            )
+
+            XCTAssertEqual(summary.titleUnavailableCount, 1)
+            XCTAssertEqual(summary.titleUnavailableReasons, [availability: 1])
+        }
+    }
+
+    @MainActor
+    func testLocalProcessingMapsFoundationAvailabilityTransitionToUnavailable() async {
+        let now = Date(timeIntervalSince1970: 10_650)
+        var fixture = singleRecordingProcessingFixture(
+            id: "availability_transition",
+            title: "Watch Idea",
+            transcriptText: "Transcript survives a capability transition.",
+            titleAvailability: .available,
+            titleResult: .success(IdeaTitleGenerationResult(title: "Unused")),
+            now: now
+        )
+        fixture.services.titleGeneration = AvailabilityTransitionTitleGenerator(error: .modelNotReady)
+
+        let summary = await fixture.store.processLocalRecordingsForSpeechTranscription(
+            services: fixture.services,
+            now: now.addingTimeInterval(60)
+        )
+
+        XCTAssertEqual(summary.completedCount, 1)
+        XCTAssertEqual(summary.titleFailedCount, 0)
+        XCTAssertEqual(summary.titleUnavailableReasons, [.modelNotReady: 1])
+    }
+
+    @MainActor
+    func testUploadedProcessingPreservesTranscriptAndTitleWhenGenerationFails() async throws {
+        let now = Date(timeIntervalSince1970: 10_700)
+        let fixture = singleRecordingProcessingFixture(
+            id: "title_failure",
+            title: "Quick captured idea",
+            localFileStatus: .uploaded,
+            syncStatus: .uploaded,
+            transcriptText: "Backend transcript remains valid.",
+            titleAvailability: .available,
+            titleResult: .failure(.failed),
+            privacyMode: .standardCloud,
+            now: now
+        )
+
+        let summary = await fixture.store.processUploadedRecordingsForTranscription(
+            services: fixture.services,
+            now: now.addingTimeInterval(60)
+        )
+
+        let savedProject = try XCTUnwrap(fixture.repository.state?.projects.first)
+        XCTAssertEqual(summary.completedCount, 1)
+        XCTAssertEqual(summary.failedCount, 0)
+        XCTAssertEqual(summary.titleFailedCount, 1)
+        XCTAssertEqual(savedProject.title, "Quick captured idea")
+        XCTAssertEqual(savedProject.transcript.cleanText, "Backend transcript remains valid.")
+        XCTAssertEqual(savedProject.recordings.first?.syncStatus, .ready)
+        XCTAssertNil(savedProject.recordings.first?.processingDiagnostic)
+    }
+
+    @MainActor
+    func testLocalProcessingProtectsUserAuthoredTitle() async throws {
+        let now = Date(timeIntervalSince1970: 10_800)
+        let fixture = singleRecordingProcessingFixture(
+            id: "user_title",
+            title: "Founder interview follow-up",
+            transcriptText: "Review onboarding friction with the founder.",
+            titleAvailability: .available,
+            titleResult: .success(IdeaTitleGenerationResult(title: "Replacement must not win")),
+            now: now
+        )
+
+        let summary = await fixture.store.processLocalRecordingsForSpeechTranscription(
+            services: fixture.services,
+            now: now.addingTimeInterval(60)
+        )
+
+        let savedProject = try XCTUnwrap(fixture.repository.state?.projects.first)
+        XCTAssertEqual(summary.completedCount, 1)
+        XCTAssertEqual(summary.titleGeneratedCount, 0)
+        XCTAssertEqual(summary.titlePreservedCount, 1)
+        XCTAssertEqual(summary.titleFailedCount, 0)
+        XCTAssertEqual(savedProject.title, "Founder interview follow-up")
+        XCTAssertEqual(savedProject.transcript.cleanText, "Review onboarding friction with the founder.")
+    }
+
+    @MainActor
+    func testLocalProcessingIncludesRetainedAudioAfterUpload() async throws {
+        let now = Date(timeIntervalSince1970: 10_900)
+        let fixture = singleRecordingProcessingFixture(
+            id: "retained_after_upload",
+            title: "Mac captured idea",
+            localFileStatus: .uploaded,
+            syncStatus: .uploaded,
+            transcriptText: "Retained local audio was transcribed.",
+            titleAvailability: .frameworkUnavailable,
+            titleResult: .failure(.failed),
+            now: now
+        )
+
+        let summary = await fixture.store.processLocalRecordingsForSpeechTranscription(
+            services: fixture.services,
+            now: now.addingTimeInterval(60)
+        )
+
+        let savedProject = try XCTUnwrap(fixture.repository.state?.projects.first)
+        XCTAssertEqual(summary.attemptedCount, 1)
+        XCTAssertEqual(summary.completedCount, 1)
+        XCTAssertEqual(savedProject.transcript.cleanText, "Retained local audio was transcribed.")
+        XCTAssertEqual(savedProject.recordings.first?.localFileStatus, .uploaded)
+        XCTAssertEqual(savedProject.recordings.first?.localAudioPath, "recordings/retained_after_upload.m4a")
+        XCTAssertEqual(savedProject.recordings.first?.syncStatus, .ready)
+    }
+
+    @MainActor
+    func testLocalSpeechCandidatesExcludeIneligibleRecordingLocales() {
+        let now = Date(timeIntervalSince1970: 10_950)
+        let ready = processingTestRecording(
+            id: "rec_ready_unsupported",
+            projectID: "idea_candidate_locales",
+            localFileStatus: .available,
+            syncStatus: .ready,
+            now: now
+        )
+        var pending = processingTestRecording(
+            id: "rec_pending_supported",
+            projectID: "idea_candidate_locales",
+            localFileStatus: .available,
+            syncStatus: .pending,
+            now: now.addingTimeInterval(1)
+        )
+        pending.languageHint = "en-US"
+        let project = processingTestProject(
+            id: "idea_candidate_locales",
+            title: "Candidate locales",
+            recordings: [ready, pending],
+            transcript: Transcript(cleanText: "Queued.", segments: [], unclearFragments: []),
+            now: now
+        )
+        let store = processingTestStore(project: project, repository: RevisionTrackingWorkspaceRepository(), now: now)
+
+        XCTAssertEqual(store.localSpeechTranscriptionCandidates().map(\.id), [pending.id])
+    }
+
+    @MainActor
+    func testLocalProcessingReplacesAndAppendsOnlyStableSegmentsForMatchingRecordings() async throws {
+        let now = Date(timeIntervalSince1970: 11_000)
+        let replacementRecording = processingTestRecording(
+            id: "rec_replace_segment",
+            projectID: "idea_segment_merge",
+            localFileStatus: .available,
+            syncStatus: .pending,
+            now: now
+        )
+        let appendRecording = processingTestRecording(
+            id: "rec_append_segment",
+            projectID: "idea_segment_merge",
+            localFileStatus: .available,
+            syncStatus: .pending,
+            now: now.addingTimeInterval(1)
+        )
+        let protectedRecording = processingTestRecording(
+            id: "rec_protected_segment",
+            projectID: "idea_segment_merge",
+            localFileStatus: .available,
+            syncStatus: .ready,
+            now: now.addingTimeInterval(2)
+        )
+        let protectedSegment = TranscriptSegment(
+            id: "segment_rec_protected_segment",
+            startSeconds: 0,
+            endSeconds: 30,
+            text: "Protected sibling recording text.",
+            isMarkedImportant: true
+        )
+        let project = processingTestProject(
+            id: "idea_segment_merge",
+            title: "Founder interview follow-up",
+            recordings: [replacementRecording, appendRecording, protectedRecording],
+            transcript: Transcript(
+                cleanText: "Old replacement text.\n\nProtected sibling recording text.",
+                segments: [
+                    TranscriptSegment(
+                        id: "segment_rec_replace_segment",
+                        startSeconds: 0,
+                        endSeconds: 30,
+                        text: "Old replacement text.",
+                        isMarkedImportant: false
+                    ),
+                    protectedSegment
+                ],
+                unclearFragments: ["Existing unclear fragment"]
+            ),
+            now: now
+        )
+        let repository = RevisionTrackingWorkspaceRepository()
+        let store = processingTestStore(project: project, repository: repository, now: now)
+        let services = IdeaForgeServices(
+            transcription: RecordingMappedTranscriptionService(
+                transcripts: [
+                    replacementRecording.id: Transcript(
+                        cleanText: "Replacement recording transcript.",
+                        segments: [
+                            TranscriptSegment(
+                                id: "provider_specific_replace_id",
+                                startSeconds: 3,
+                                endSeconds: 29,
+                                text: "Replacement recording transcript.",
+                                isMarkedImportant: false
+                            )
+                        ],
+                        unclearFragments: ["New unclear fragment"]
+                    ),
+                    appendRecording.id: Transcript(
+                        cleanText: "New appended recording transcript.",
+                        segments: [
+                            TranscriptSegment(
+                                id: "provider_specific_append_id",
+                                startSeconds: 0,
+                                endSeconds: 30,
+                                text: "New appended recording transcript.",
+                                isMarkedImportant: false
+                            )
+                        ],
+                        unclearFragments: []
+                    )
+                ]
+            ),
+            titleGeneration: StubTitleGenerator(
+                availability: .available,
+                result: .success(IdeaTitleGenerationResult(title: "Must not replace a user title"))
+            ),
+            workflow: LocalWorkflowExecutionService(),
+            syncQueue: LocalSyncQueueService(),
+            export: LocalExportService()
+        )
+
+        let firstSummary = await store.processLocalRecordingsForSpeechTranscription(
+            services: services,
+            maxRecordingsPerRun: 1,
+            now: now.addingTimeInterval(60)
+        )
+        let firstProject = try XCTUnwrap(repository.state?.projects.first)
+        XCTAssertEqual(firstSummary.completedCount, 1)
+        XCTAssertEqual(firstProject.transcript.segments.map(\.id), [
+            "segment_rec_replace_segment",
+            "segment_rec_protected_segment"
+        ])
+        XCTAssertEqual(firstProject.transcript.segments[0].text, "Replacement recording transcript.")
+        XCTAssertEqual(firstProject.transcript.segments[1], protectedSegment)
+        XCTAssertEqual(
+            firstProject.transcript.cleanText,
+            "Replacement recording transcript.\n\nProtected sibling recording text."
+        )
+
+        let secondSummary = await store.processLocalRecordingsForSpeechTranscription(
+            services: services,
+            maxRecordingsPerRun: 1,
+            now: now.addingTimeInterval(120)
+        )
+        let secondProject = try XCTUnwrap(repository.state?.projects.first)
+        XCTAssertEqual(secondSummary.completedCount, 1)
+        XCTAssertEqual(secondProject.transcript.segments.map(\.id), [
+            "segment_rec_replace_segment",
+            "segment_rec_protected_segment",
+            "segment_rec_append_segment"
+        ])
+        XCTAssertEqual(secondProject.transcript.segments[0].text, "Replacement recording transcript.")
+        XCTAssertEqual(secondProject.transcript.segments[1], protectedSegment)
+        XCTAssertEqual(secondProject.transcript.segments[2].text, "New appended recording transcript.")
+        XCTAssertEqual(
+            secondProject.transcript.cleanText,
+            "Replacement recording transcript.\n\nProtected sibling recording text.\n\nNew appended recording transcript."
+        )
+        XCTAssertEqual(secondProject.transcript.unclearFragments, ["Existing unclear fragment", "New unclear fragment"])
+    }
+
+    @MainActor
+    func testLocalProcessingStopsBeforeProvidersWhenTranscribingCheckpointCannotPersist() async throws {
+        let now = Date(timeIntervalSince1970: 11_100)
+        let fixture = singleRecordingProcessingFixture(
+            id: "checkpoint_failure",
+            title: "Watch Idea",
+            transcriptText: "Must not run.",
+            titleAvailability: .available,
+            titleResult: .success(IdeaTitleGenerationResult(title: "Must not run")),
+            now: now
+        )
+        let initialState = fixture.store.workspaceState(now: now)
+        let repository = NthSaveFailingWorkspaceRepository(state: initialState, failingSaveNumbers: [1])
+        let transcription = TrackingTranscriptionService(
+            transcript: Transcript(cleanText: "Must not run.", segments: [], unclearFragments: [])
+        )
+        let titles = TrackingTitleGenerator(availability: .available)
+        let store = IdeaForgeStore(state: initialState, repository: repository)
+        let services = processingTestServices(transcription: transcription, titleGeneration: titles)
+
+        let summary = await store.processLocalRecordingsForSpeechTranscription(
+            services: services,
+            now: now.addingTimeInterval(60)
+        )
+
+        XCTAssertEqual(summary.attemptedCount, 1)
+        XCTAssertEqual(summary.completedCount, 0)
+        XCTAssertEqual(summary.failedCount, 1)
+        let transcriptionCalls = await transcription.callCount()
+        let availabilityCalls = await titles.availabilityCallCount()
+        let generationCalls = await titles.generationCallCount()
+        XCTAssertEqual(transcriptionCalls, 0)
+        XCTAssertEqual(availabilityCalls, 0)
+        XCTAssertEqual(generationCalls, 0)
+        XCTAssertEqual(store.projects.first?.recordings.first?.syncStatus, .pending)
+        XCTAssertEqual(repository.state?.projects.first?.recordings.first?.syncStatus, .pending)
+        XCTAssertEqual(store.lastErrorMessage, "Transcription could not start because workspace state could not be saved.")
+    }
+
+    @MainActor
+    func testProductionLoadRecoversInterruptedTranscriptionWithoutLosingTranscript() throws {
+        let now = Date(timeIntervalSince1970: 11_125)
+        let recording = processingTestRecording(
+            id: "rec_interrupted_transcription",
+            projectID: "idea_interrupted_transcription",
+            localFileStatus: .uploaded,
+            syncStatus: .transcribing,
+            localAudioPath: "recordings/interrupted.m4a",
+            audioObjectKey: "audio/idea_interrupted_transcription/rec_interrupted_transcription.m4a",
+            now: now
+        )
+        let transcript = Transcript(cleanText: "Existing transcript remains intact.", segments: [], unclearFragments: [])
+        let project = processingTestProject(
+            id: "idea_interrupted_transcription",
+            title: "Existing title",
+            recordings: [recording],
+            transcript: transcript,
+            now: now
+        )
+        let state = WorkspaceState(
+            projects: [project],
+            workflowTemplates: DefaultWorkflows.templates,
+            uploadJobs: [],
+            privacyMode: .standardCloud,
+            syncHealth: SyncHealth(watchReachable: false, queuedUploads: 0, lastSuccessfulSync: now, failingItems: 0),
+            selectedProjectID: project.id,
+            updatedAt: now
+        )
+        let repository = RevisionTrackingWorkspaceRepository(state: state)
+
+        let recovered = IdeaForgeStore.production(repository: repository)
+
+        let saved = try XCTUnwrap(repository.state)
+        XCTAssertEqual(recovered.projects.first?.transcript, transcript)
+        XCTAssertEqual(saved.projects.first?.transcript, transcript)
+        XCTAssertEqual(saved.projects.first?.recordings.first?.syncStatus, .failed)
+        XCTAssertEqual(saved.projects.first?.recordings.first?.localFileStatus, .uploaded)
+        XCTAssertEqual(saved.projects.first?.recordings.first?.processingDiagnostic?.isRetryable, true)
+    }
+
+    @MainActor
+    func testLocalProcessingPreservesUnsegmentedSiblingText() async throws {
+        let now = Date(timeIntervalSince1970: 11_200)
+        let target = processingTestRecording(
+            id: "rec_target_with_legacy_sibling",
+            projectID: "idea_legacy_sibling",
+            localFileStatus: .available,
+            syncStatus: .pending,
+            now: now
+        )
+        let sibling = processingTestRecording(
+            id: "rec_unsegmented_sibling",
+            projectID: "idea_legacy_sibling",
+            localFileStatus: .available,
+            syncStatus: .ready,
+            now: now.addingTimeInterval(1)
+        )
+        let project = processingTestProject(
+            id: "idea_legacy_sibling",
+            title: "Founder interview notes",
+            recordings: [target, sibling],
+            transcript: Transcript(
+                cleanText: "Old target transcript.\n\nSibling transcript stored only in clean text.",
+                segments: [
+                    TranscriptSegment(
+                        id: "segment_rec_target_with_legacy_sibling",
+                        startSeconds: 0,
+                        endSeconds: 30,
+                        text: "Old target transcript.",
+                        isMarkedImportant: false
+                    )
+                ],
+                unclearFragments: []
+            ),
+            now: now
+        )
+        let repository = RevisionTrackingWorkspaceRepository()
+        let store = processingTestStore(project: project, repository: repository, now: now)
+        let services = processingTestServices(
+            transcription: SucceedingTranscriptionService(
+                transcript: Transcript(cleanText: "Replacement target transcript.", segments: [], unclearFragments: [])
+            ),
+            titleGeneration: StubTitleGenerator(availability: .available, result: .failure(.failed))
+        )
+
+        let summary = await store.processLocalRecordingsForSpeechTranscription(
+            services: services,
+            maxRecordingsPerRun: 1,
+            now: now.addingTimeInterval(60)
+        )
+
+        let saved = try XCTUnwrap(repository.state?.projects.first)
+        XCTAssertEqual(summary.completedCount, 1)
+        XCTAssertEqual(
+            saved.transcript.cleanText,
+            "Replacement target transcript.\n\nSibling transcript stored only in clean text."
+        )
+        XCTAssertEqual(saved.transcript.segments.map(\.id), [
+            "segment_rec_target_with_legacy_sibling",
+            "segment_legacy_unowned"
+        ])
+    }
+
+    @MainActor
+    func testLocalProcessingRejectsCompletionWhenRecordingIsRemovedDuringTranscription() async throws {
+        let now = Date(timeIntervalSince1970: 11_300)
+        let fixture = singleRecordingProcessingFixture(
+            id: "removed_during_transcription",
+            title: "Watch Idea",
+            transcriptText: "Stale transcription must not win.",
+            titleAvailability: .available,
+            titleResult: .success(IdeaTitleGenerationResult(title: "Stale title")),
+            now: now
+        )
+        let blocking = BlockingTranscriptionService(
+            transcript: Transcript(cleanText: "Stale transcription must not win.", segments: [], unclearFragments: [])
+        )
+        var services = fixture.services
+        services.transcription = blocking
+
+        let processing = Task { @MainActor in
+            await fixture.store.processLocalRecordingsForSpeechTranscription(
+                services: services,
+                now: now.addingTimeInterval(60)
+            )
+        }
+        await blocking.waitUntilStarted()
+        fixture.store.projects[0].recordings.removeAll()
+        XCTAssertTrue(fixture.store.save(now: now.addingTimeInterval(90)))
+        await blocking.release()
+        let summary = await processing.value
+
+        let savedProject = try XCTUnwrap(fixture.repository.state?.projects.first)
+        XCTAssertEqual(summary.completedCount, 0)
+        XCTAssertEqual(summary.failedCount, 1)
+        XCTAssertEqual(savedProject.title, "Watch Idea")
+        XCTAssertEqual(savedProject.transcript.cleanText, "Queued.")
+        XCTAssertTrue(savedProject.recordings.isEmpty)
+    }
+
+    @MainActor
+    func testLocalProcessingRejectsStaleFailureWhenRecordingIsRemovedDuringTranscription() async throws {
+        let now = Date(timeIntervalSince1970: 11_350)
+        let fixture = singleRecordingProcessingFixture(
+            id: "removed_during_failed_transcription",
+            title: "Watch Idea",
+            transcriptText: "Unused transcript.",
+            titleAvailability: .available,
+            titleResult: .success(IdeaTitleGenerationResult(title: "Unused title")),
+            now: now
+        )
+        let blocking = BlockingTranscriptionService(error: .emptyRecognition)
+        var services = fixture.services
+        services.transcription = blocking
+
+        let processing = Task { @MainActor in
+            await fixture.store.processLocalRecordingsForSpeechTranscription(
+                services: services,
+                now: now.addingTimeInterval(60)
+            )
+        }
+        await blocking.waitUntilStarted()
+        fixture.store.projects[0].recordings.removeAll()
+        XCTAssertTrue(fixture.store.save(now: now.addingTimeInterval(90)))
+        await blocking.release()
+        let summary = await processing.value
+
+        let savedProject = try XCTUnwrap(fixture.repository.state?.projects.first)
+        XCTAssertEqual(summary, AIProcessingSummary(attemptedCount: 1, completedCount: 0, failedCount: 1))
+        XCTAssertTrue(savedProject.recordings.isEmpty)
+        XCTAssertEqual(fixture.store.syncHealth.failingItems, 0)
+        XCTAssertEqual(fixture.repository.state?.syncHealth.failingItems, 0)
+        XCTAssertEqual(fixture.repository.savedStates.count, 2)
+    }
+
+    @MainActor
+    func testUploadedProcessingRejectsStaleFailureAfterRecordingAndSegmentChange() async throws {
+        let now = Date(timeIntervalSince1970: 11_375)
+        let fixture = singleRecordingProcessingFixture(
+            id: "changed_during_failed_transcription",
+            title: "Watch Idea",
+            localFileStatus: .uploaded,
+            syncStatus: .uploaded,
+            transcriptText: "Unused transcript.",
+            titleAvailability: .available,
+            titleResult: .success(IdeaTitleGenerationResult(title: "Unused title")),
+            privacyMode: .standardCloud,
+            now: now
+        )
+        let blocking = BlockingTranscriptionService(error: .emptyRecognition)
+        var services = fixture.services
+        services.transcription = blocking
+
+        let processing = Task { @MainActor in
+            await fixture.store.processUploadedRecordingsForTranscription(
+                services: services,
+                now: now.addingTimeInterval(60)
+            )
+        }
+        await blocking.waitUntilStarted()
+        fixture.store.projects[0].recordings[0].syncStatus = .ready
+        fixture.store.projects[0].transcript = Transcript(
+            cleanText: "Newer user-edited transcript.",
+            segments: [
+                TranscriptSegment(
+                    id: "segment_rec_changed_during_failed_transcription",
+                    startSeconds: 0,
+                    endSeconds: 30,
+                    text: "Newer user-edited transcript.",
+                    isMarkedImportant: true
+                )
+            ],
+            unclearFragments: []
+        )
+        fixture.store.projects[0].summary = "Newer user-edited transcript."
+        XCTAssertTrue(fixture.store.save(now: now.addingTimeInterval(90)))
+        await blocking.release()
+        let summary = await processing.value
+
+        let savedProject = try XCTUnwrap(fixture.repository.state?.projects.first)
+        XCTAssertEqual(summary, AIProcessingSummary(attemptedCount: 1, completedCount: 0, failedCount: 1))
+        XCTAssertEqual(savedProject.recordings.first?.syncStatus, .ready)
+        XCTAssertNil(savedProject.recordings.first?.processingDiagnostic)
+        XCTAssertEqual(savedProject.transcript.cleanText, "Newer user-edited transcript.")
+        XCTAssertEqual(savedProject.transcript.segments.first?.isMarkedImportant, true)
+        XCTAssertEqual(fixture.store.syncHealth.failingItems, 0)
+        XCTAssertEqual(fixture.repository.state?.syncHealth.failingItems, 0)
+        XCTAssertEqual(fixture.repository.savedStates.count, 2)
+    }
+
+    @MainActor
+    func testLocalProcessingRejectsCompletionWhenOwnedSegmentChangesDuringTitleGeneration() async throws {
+        let now = Date(timeIntervalSince1970: 11_400)
+        let recording = processingTestRecording(
+            id: "rec_segment_changed_during_title",
+            projectID: "idea_segment_changed_during_title",
+            localFileStatus: .available,
+            syncStatus: .pending,
+            now: now
+        )
+        let project = processingTestProject(
+            id: "idea_segment_changed_during_title",
+            title: "Watch Idea",
+            recordings: [recording],
+            transcript: Transcript(
+                cleanText: "Original segment text.",
+                segments: [
+                    TranscriptSegment(
+                        id: "segment_rec_segment_changed_during_title",
+                        startSeconds: 0,
+                        endSeconds: 30,
+                        text: "Original segment text.",
+                        isMarkedImportant: false
+                    )
+                ],
+                unclearFragments: []
+            ),
+            now: now
+        )
+        let repository = RevisionTrackingWorkspaceRepository()
+        let store = processingTestStore(project: project, repository: repository, now: now)
+        let titles = BlockingTitleGenerator(title: "Stale generated title")
+        let services = processingTestServices(
+            transcription: SucceedingTranscriptionService(
+                transcript: Transcript(cleanText: "Stale generated transcript.", segments: [], unclearFragments: [])
+            ),
+            titleGeneration: titles
+        )
+
+        let processing = Task { @MainActor in
+            await store.processLocalRecordingsForSpeechTranscription(
+                services: services,
+                now: now.addingTimeInterval(60)
+            )
+        }
+        await titles.waitUntilGenerationStarted()
+        XCTAssertTrue(
+            store.updateTranscriptSegment(
+                projectID: project.id,
+                segmentID: "segment_rec_segment_changed_during_title",
+                text: "User edited segment while title generation was running.",
+                isMarkedImportant: true,
+                now: now.addingTimeInterval(90)
+            )
+        )
+        await titles.release()
+        let summary = await processing.value
+
+        let savedProject = try XCTUnwrap(repository.state?.projects.first)
+        XCTAssertEqual(summary.completedCount, 0)
+        XCTAssertEqual(summary.failedCount, 1)
+        XCTAssertEqual(savedProject.title, "Watch Idea")
+        XCTAssertEqual(
+            savedProject.transcript.segments.first?.text,
+            "User edited segment while title generation was running."
+        )
+    }
+
+    @MainActor
+    func testLocalProcessingKeepsConcurrentProjectAndSyncRevisionPublishable() async throws {
+        let startedAt = Date(timeIntervalSince1970: 11_425)
+        let concurrentAt = startedAt.addingTimeInterval(120)
+        let fixture = singleRecordingProcessingFixture(
+            id: "concurrent_sync_revision",
+            title: "Watch Idea",
+            transcriptText: "Enriched after a concurrent sync receipt.",
+            titleAvailability: .available,
+            titleResult: .success(IdeaTitleGenerationResult(title: "Generated Later")),
+            privacyMode: .standardCloud,
+            now: startedAt
+        )
+        let titles = BlockingTitleGenerator(title: "Generated Later")
+        var services = fixture.services
+        services.titleGeneration = titles
+
+        let processing = Task { @MainActor in
+            await fixture.store.processLocalRecordingsForSpeechTranscription(
+                services: services,
+                now: startedAt.addingTimeInterval(60)
+            )
+        }
+        await titles.waitUntilGenerationStarted()
+        fixture.store.projects[0].tags.append(.business)
+        fixture.store.projects[0].updatedAt = concurrentAt
+        fixture.store.syncHealth.lastPublishedLocalUpdatedAt = concurrentAt
+        XCTAssertTrue(fixture.store.save(now: concurrentAt))
+        await titles.release()
+        let summary = await processing.value
+
+        let saved = try XCTUnwrap(fixture.repository.state)
+        XCTAssertEqual(summary.completedCount, 1)
+        XCTAssertTrue(saved.projects[0].tags.contains(.business))
+        XCTAssertGreaterThan(saved.updatedAt, concurrentAt)
+        XCTAssertGreaterThan(saved.projects[0].updatedAt, concurrentAt)
+        XCTAssertNil(WorkspaceAutoSyncPolicy.localPreflightDecision(for: saved))
+    }
+
+    @MainActor
+    func testLocalProcessingRevisionRemainsPublishableAfterJSONRepositoryRelaunch() async throws {
+        let startedAt = Date(timeIntervalSince1970: 11_450)
+        let receiptAt = startedAt.addingTimeInterval(120)
+        let fixture = singleRecordingProcessingFixture(
+            id: "json_revision_round_trip",
+            title: "Watch Idea",
+            transcriptText: "Persisted beyond the sync receipt.",
+            titleAvailability: .available,
+            titleResult: .success(IdeaTitleGenerationResult(title: "Generated After Receipt")),
+            privacyMode: .standardCloud,
+            now: startedAt
+        )
+        let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+        let repository = JSONWorkspaceRepository(fileURL: directory.appending(path: "workspace.json"))
+        try repository.save(fixture.store.workspaceState(now: startedAt))
+        let store = IdeaForgeStore(state: try XCTUnwrap(repository.load()), repository: repository)
+        let titles = BlockingTitleGenerator(title: "Generated After Receipt")
+        var services = fixture.services
+        services.titleGeneration = titles
+
+        let processing = Task { @MainActor in
+            await store.processLocalRecordingsForSpeechTranscription(
+                services: services,
+                now: startedAt.addingTimeInterval(60)
+            )
+        }
+        await titles.waitUntilGenerationStarted()
+        store.syncHealth.lastPublishedLocalUpdatedAt = receiptAt
+        XCTAssertTrue(store.save(now: receiptAt))
+        await titles.release()
+        let summary = await processing.value
+        XCTAssertEqual(summary.completedCount, 1)
+
+        let relaunched = try XCTUnwrap(repository.load())
+        XCTAssertGreaterThan(relaunched.updatedAt, receiptAt)
+        XCTAssertGreaterThan(relaunched.projects[0].updatedAt, receiptAt)
+        XCTAssertNil(WorkspaceAutoSyncPolicy.localPreflightDecision(for: relaunched))
+    }
+
+    @MainActor
+    func testLocalProcessingRollsBackCombinedStateWhenFinalSaveFails() async throws {
+        let now = Date(timeIntervalSince1970: 11_500)
+        let fixture = singleRecordingProcessingFixture(
+            id: "final_save_failure",
+            title: "Watch Idea",
+            transcriptText: "Must roll back.",
+            titleAvailability: .available,
+            titleResult: .success(IdeaTitleGenerationResult(title: "Must Roll Back")),
+            now: now
+        )
+        fixture.store.projects[0].transcript.cleanText = "Original transcript."
+        fixture.store.projects[0].summary = "Original transcript."
+        let initialState = fixture.store.workspaceState(now: now)
+        let repository = NthSaveFailingWorkspaceRepository(state: initialState, failingSaveNumbers: [2])
+        let store = IdeaForgeStore(state: initialState, repository: repository)
+
+        let summary = await store.processLocalRecordingsForSpeechTranscription(
+            services: fixture.services,
+            now: now.addingTimeInterval(60)
+        )
+
+        XCTAssertEqual(summary, AIProcessingSummary(attemptedCount: 1, completedCount: 0, failedCount: 1))
+        XCTAssertEqual(store.projects.first?.title, "Watch Idea")
+        XCTAssertEqual(store.projects.first?.transcript.cleanText, "Original transcript.")
+        XCTAssertEqual(store.projects.first?.recordings.first?.syncStatus, .transcribing)
+        XCTAssertEqual(repository.state?.projects.first?.title, "Watch Idea")
+        XCTAssertEqual(repository.state?.projects.first?.transcript.cleanText, "Original transcript.")
+        XCTAssertEqual(repository.state?.projects.first?.recordings.first?.syncStatus, .transcribing)
+    }
+
+    @MainActor
+    func testLocalProcessingRollsBackFailureWhenFailureSaveFails() async throws {
+        let now = Date(timeIntervalSince1970: 11_525)
+        let fixture = singleRecordingProcessingFixture(
+            id: "failure_save_failure",
+            title: "Watch Idea",
+            transcriptText: "Unused.",
+            titleAvailability: .available,
+            titleResult: .failure(.failed),
+            now: now
+        )
+        let initialState = fixture.store.workspaceState(now: now)
+        let repository = NthSaveFailingWorkspaceRepository(state: initialState, failingSaveNumbers: [2])
+        let store = IdeaForgeStore(state: initialState, repository: repository)
+        var services = fixture.services
+        services.transcription = FailingTranscriptionService(error: LocalSpeechTranscriptionError.recognizerUnavailable)
+
+        let summary = await store.processLocalRecordingsForSpeechTranscription(
+            services: services,
+            now: now.addingTimeInterval(60)
+        )
+
+        XCTAssertEqual(summary, AIProcessingSummary(attemptedCount: 1, completedCount: 0, failedCount: 1))
+        XCTAssertEqual(store.projects.first?.recordings.first?.syncStatus, .transcribing)
+        XCTAssertNil(store.projects.first?.recordings.first?.processingDiagnostic)
+        XCTAssertEqual(store.syncHealth.failingItems, 0)
+        XCTAssertEqual(repository.state?.projects.first?.recordings.first?.syncStatus, .transcribing)
+        XCTAssertEqual(store.lastErrorMessage, "Transcription failure could not be saved.")
+    }
+
+    @MainActor
+    func testLocalProcessingSkipsProviderCallsForProtectedAndUnavailableTitles() async throws {
+        let now = Date(timeIntervalSince1970: 11_600)
+        let protectedTitles = TrackingTitleGenerator(availability: .available)
+        var protectedFixture = singleRecordingProcessingFixture(
+            id: "protected_provider_calls",
+            title: "User-authored title",
+            transcriptText: "Protected transcript.",
+            titleAvailability: .available,
+            titleResult: .success(IdeaTitleGenerationResult(title: "Must not run")),
+            now: now
+        )
+        protectedFixture.services.titleGeneration = protectedTitles
+
+        _ = await protectedFixture.store.processLocalRecordingsForSpeechTranscription(
+            services: protectedFixture.services,
+            now: now.addingTimeInterval(60)
+        )
+
+        let protectedAvailabilityCalls = await protectedTitles.availabilityCallCount()
+        let protectedGenerationCalls = await protectedTitles.generationCallCount()
+        XCTAssertEqual(protectedAvailabilityCalls, 0)
+        XCTAssertEqual(protectedGenerationCalls, 0)
+
+        let unavailableTitles = TrackingTitleGenerator(availability: .modelNotReady)
+        var unavailableFixture = singleRecordingProcessingFixture(
+            id: "unavailable_provider_calls",
+            title: "Watch Idea",
+            transcriptText: "Unavailable transcript.",
+            titleAvailability: .modelNotReady,
+            titleResult: .success(IdeaTitleGenerationResult(title: "Must not run")),
+            now: now.addingTimeInterval(120)
+        )
+        unavailableFixture.services.titleGeneration = unavailableTitles
+
+        _ = await unavailableFixture.store.processLocalRecordingsForSpeechTranscription(
+            services: unavailableFixture.services,
+            now: now.addingTimeInterval(180)
+        )
+
+        let unavailableAvailabilityCalls = await unavailableTitles.availabilityCallCount()
+        let unavailableGenerationCalls = await unavailableTitles.generationCallCount()
+        XCTAssertEqual(unavailableAvailabilityCalls, 1)
+        XCTAssertEqual(unavailableGenerationCalls, 0)
+    }
+
+    @MainActor
+    func testLocalProcessingRetryReplacesOwnedUnclearFragments() async throws {
+        let now = Date(timeIntervalSince1970: 11_700)
+        let fixture = singleRecordingProcessingFixture(
+            id: "unclear_retry",
+            title: "User title",
+            transcriptText: "First transcript.",
+            titleAvailability: .available,
+            titleResult: .failure(.failed),
+            now: now
+        )
+        let transcription = SequencedTranscriptionService(transcripts: [
+            Transcript(cleanText: "First transcript.", segments: [], unclearFragments: ["old unclear"]),
+            Transcript(cleanText: "Corrected transcript.", segments: [], unclearFragments: ["new unclear"])
+        ])
+        var services = fixture.services
+        services.transcription = transcription
+
+        _ = await fixture.store.processLocalRecordingsForSpeechTranscription(
+            services: services,
+            now: now.addingTimeInterval(60)
+        )
+        fixture.store.projects[0].recordings[0].syncStatus = .pending
+        XCTAssertTrue(fixture.store.save(now: now.addingTimeInterval(90)))
+        _ = await fixture.store.processLocalRecordingsForSpeechTranscription(
+            services: services,
+            now: now.addingTimeInterval(120)
+        )
+
+        let saved = try XCTUnwrap(fixture.repository.state?.projects.first?.transcript)
+        XCTAssertEqual(saved.cleanText, "Corrected transcript.")
+        XCTAssertEqual(saved.unclearFragments, ["new unclear"])
+        XCTAssertEqual(saved.unclearFragmentsByRecordingID["rec_unclear_retry"], ["new unclear"])
+        let roundTripped = try JSONDecoder().decode(Transcript.self, from: JSONEncoder().encode(saved))
+        XCTAssertEqual(roundTripped, saved)
     }
 
     @MainActor
@@ -9884,7 +11660,10 @@ final class IdeaForgeCoreTests: XCTestCase {
         )
 
         let saved = try XCTUnwrap(try repository.load())
-        XCTAssertEqual(summary, AIProcessingSummary(attemptedCount: 1, completedCount: 1, failedCount: 0))
+        XCTAssertEqual(
+            summary,
+            AIProcessingSummary(attemptedCount: 1, completedCount: 1, failedCount: 0, titlePreservedCount: 1)
+        )
         XCTAssertEqual(saved.projects.first?.summary, "A local Watch transcript ready for review.")
         XCTAssertEqual(saved.projects.first?.recordings.first?.syncStatus, .ready)
         XCTAssertEqual(saved.projects.first?.recordings.first?.localFileStatus, .available)
@@ -10048,6 +11827,137 @@ final class IdeaForgeCoreTests: XCTestCase {
         XCTAssertFalse(diagnostic.message.contains("raw transcript"))
     }
 
+    func testKeepRecordingWithoutTranscriptPreservesAudioAndSiblingTranscript() throws {
+        let now = Date(timeIntervalSince1970: 21_000)
+        let reviewedAt = now.addingTimeInterval(60)
+        let failedRecording = Recording(
+            id: "rec_reviewed_without_transcript",
+            ideaProjectID: "idea_reviewed_without_transcript",
+            deviceName: "Watch",
+            durationSeconds: 16,
+            localFileStatus: .uploaded,
+            syncStatus: .failed,
+            localAudioPath: "recordings/reviewed-without-transcript.m4a",
+            audioObjectKey: "audio/idea_reviewed_without_transcript/rec_reviewed_without_transcript.m4a",
+            languageHint: "en",
+            createdAt: now,
+            markerOffsets: [],
+            processingDiagnostic: RecordingProcessingDiagnostic(
+                code: .localSpeechUnavailable,
+                message: "Speech recognition did not return usable text.",
+                isRetryable: false,
+                failedAt: now
+            )
+        )
+        let siblingRecording = Recording(
+            id: "rec_sibling_transcript",
+            ideaProjectID: "idea_reviewed_without_transcript",
+            deviceName: "Watch",
+            durationSeconds: 49,
+            localFileStatus: .uploaded,
+            syncStatus: .ready,
+            localAudioPath: "recordings/sibling.m4a",
+            audioObjectKey: "audio/idea_reviewed_without_transcript/rec_sibling_transcript.m4a",
+            languageHint: "en",
+            createdAt: now,
+            markerOffsets: []
+        )
+        let project = IdeaProject(
+            id: "idea_reviewed_without_transcript",
+            title: "Watch Idea",
+            status: .inbox,
+            source: .watch,
+            createdAt: now,
+            updatedAt: now,
+            summary: "Voice idea transferred from Watch.\n\nA sibling transcript to preserve.",
+            tags: [.appIdea],
+            score: IdeaScore(confidence: 0.2, completeness: 0.1, risk: 0.7),
+            transcript: Transcript(
+                cleanText: "Voice idea transferred from Watch.\n\nA sibling transcript to preserve.",
+                segments: [
+                    TranscriptSegment(
+                        id: "segment_rec_reviewed_without_transcript",
+                        startSeconds: 0,
+                        endSeconds: 16,
+                        text: "Voice idea transferred from Watch.",
+                        isMarkedImportant: false
+                    ),
+                    TranscriptSegment(
+                        id: "segment_rec_sibling_transcript",
+                        startSeconds: 0,
+                        endSeconds: 49,
+                        text: "A sibling transcript to preserve.",
+                        isMarkedImportant: true
+                    )
+                ],
+                unclearFragments: ["failed unclear", "sibling unclear"],
+                unclearFragmentsByRecordingID: [
+                    failedRecording.id: ["failed unclear"],
+                    siblingRecording.id: ["sibling unclear"]
+                ]
+            ),
+            recordings: [failedRecording, siblingRecording],
+            questions: [],
+            artifacts: [],
+            assumptions: [],
+            validationExperiments: [],
+            codexTasks: []
+        )
+        let repository = InMemoryWorkspaceRepository()
+        let store = IdeaForgeStore(
+            projects: [project],
+            workflowTemplates: DefaultWorkflows.templates,
+            selectedProjectID: project.id,
+            privacyMode: .standardCloud,
+            syncHealth: SyncHealth(
+                watchReachable: false,
+                queuedUploads: 0,
+                lastSuccessfulSync: now,
+                failingItems: 1
+            ),
+            repository: repository
+        )
+
+        XCTAssertTrue(store.keepRecordingWithoutTranscript(recordingID: failedRecording.id, now: reviewedAt))
+
+        let saved = try XCTUnwrap(try repository.load())
+        let savedProject = try XCTUnwrap(saved.projects.first)
+        let reviewedRecording = try XCTUnwrap(savedProject.recordings.first(where: { $0.id == failedRecording.id }))
+        XCTAssertEqual(reviewedRecording.syncStatus, .ready)
+        XCTAssertEqual(reviewedRecording.localFileStatus, .uploaded)
+        XCTAssertEqual(reviewedRecording.audioObjectKey, failedRecording.audioObjectKey)
+        XCTAssertEqual(reviewedRecording.localAudioPath, failedRecording.localAudioPath)
+        XCTAssertNil(reviewedRecording.processingDiagnostic)
+        XCTAssertEqual(saved.syncHealth.failingItems, 0)
+        XCTAssertEqual(savedProject.transcript.cleanText, "A sibling transcript to preserve.")
+        XCTAssertEqual(savedProject.summary, "A sibling transcript to preserve.")
+        XCTAssertEqual(savedProject.transcript.segments.map(\.id), ["segment_rec_sibling_transcript"])
+        XCTAssertEqual(savedProject.transcript.unclearFragments, ["sibling unclear"])
+        XCTAssertEqual(
+            savedProject.transcript.unclearFragmentsByRecordingID,
+            [siblingRecording.id: ["sibling unclear"]]
+        )
+        XCTAssertEqual(savedProject.updatedAt, reviewedAt)
+    }
+
+    func testKeepRecordingWithoutTranscriptRollsBackWhenPersistenceFails() throws {
+        let state = SampleData.nonRetryableTranscriptFailureStore().workspaceState()
+        let recordingID = try XCTUnwrap(state.projects.first?.recordings.first?.id)
+        let store = IdeaForgeStore(
+            state: state,
+            repository: ThrowingWorkspaceRepository(state: state)
+        )
+
+        XCTAssertFalse(
+            store.keepRecordingWithoutTranscript(
+                recordingID: recordingID,
+                now: state.updatedAt.addingTimeInterval(60)
+            )
+        )
+        XCTAssertEqual(store.workspaceState(), state)
+        XCTAssertEqual(store.lastErrorMessage, "Recording review could not be saved.")
+    }
+
     @MainActor
     func testTranscriptionWorkerRetriesRetryableFailedRecording() async throws {
         let now = Date(timeIntervalSince1970: 30_000)
@@ -10121,7 +12031,10 @@ final class IdeaForgeCoreTests: XCTestCase {
 
         let saved = try XCTUnwrap(try repository.load())
         let recoveredRecording = try XCTUnwrap(saved.projects.first?.recordings.first)
-        XCTAssertEqual(summary, AIProcessingSummary(attemptedCount: 1, completedCount: 1, failedCount: 0))
+        XCTAssertEqual(
+            summary,
+            AIProcessingSummary(attemptedCount: 1, completedCount: 1, failedCount: 0, titlePreservedCount: 1)
+        )
         XCTAssertEqual(saved.syncHealth.failingItems, 0)
         XCTAssertEqual(saved.projects.first?.summary, "Recovered backend transcript.")
         XCTAssertEqual(recoveredRecording.syncStatus, .ready)
@@ -12133,6 +14046,363 @@ private final class ObservingWorkspaceRepository: WorkspaceRepository, @unchecke
     }
 }
 
+private final class RevisionTrackingWorkspaceRepository: WorkspaceRepository, @unchecked Sendable {
+    private(set) var state: WorkspaceState?
+    private(set) var savedStates: [WorkspaceState] = []
+
+    init(state: WorkspaceState? = nil) {
+        self.state = state
+    }
+
+    func load() throws -> WorkspaceState? {
+        state
+    }
+
+    func save(_ state: WorkspaceState) throws {
+        self.state = state
+        savedStates.append(state)
+    }
+}
+
+private final class NthSaveFailingWorkspaceRepository: WorkspaceRepository, @unchecked Sendable {
+    private(set) var state: WorkspaceState?
+    private let failingSaveNumbers: Set<Int>
+    private var saveCount = 0
+
+    init(state: WorkspaceState, failingSaveNumbers: Set<Int>) {
+        self.state = state
+        self.failingSaveNumbers = failingSaveNumbers
+    }
+
+    func load() throws -> WorkspaceState? {
+        state
+    }
+
+    func save(_ state: WorkspaceState) throws {
+        saveCount += 1
+        guard !failingSaveNumbers.contains(saveCount) else {
+            throw WorkspaceRepositoryError.unwritableState
+        }
+        self.state = state
+    }
+}
+
+private struct StubTitleGenerator: IdeaTitleGenerating {
+    var availability: IdeaTitleGenerationAvailability
+    var result: Result<IdeaTitleGenerationResult, FixedTitleGenerationFailure>
+
+    func availability(for localeIdentifier: String) async -> IdeaTitleGenerationAvailability {
+        availability
+    }
+
+    func generateTitle(for request: IdeaTitleGenerationRequest) async throws -> IdeaTitleGenerationResult {
+        try result.get()
+    }
+}
+
+private struct AvailabilityTransitionTitleGenerator: IdeaTitleGenerating {
+    var error: FoundationTitleGenerationError
+
+    func availability(for localeIdentifier: String) async -> IdeaTitleGenerationAvailability {
+        .available
+    }
+
+    func generateTitle(for request: IdeaTitleGenerationRequest) async throws -> IdeaTitleGenerationResult {
+        throw error
+    }
+}
+
+private actor TrackingTitleGenerator: IdeaTitleGenerating {
+    private let currentAvailability: IdeaTitleGenerationAvailability
+    private var availabilityCalls = 0
+    private var generationCalls = 0
+
+    init(availability: IdeaTitleGenerationAvailability) {
+        currentAvailability = availability
+    }
+
+    func availability(for localeIdentifier: String) async -> IdeaTitleGenerationAvailability {
+        availabilityCalls += 1
+        return currentAvailability
+    }
+
+    func generateTitle(for request: IdeaTitleGenerationRequest) async throws -> IdeaTitleGenerationResult {
+        generationCalls += 1
+        return IdeaTitleGenerationResult(title: "Tracked title")
+    }
+
+    func availabilityCallCount() -> Int {
+        availabilityCalls
+    }
+
+    func generationCallCount() -> Int {
+        generationCalls
+    }
+}
+
+private actor BlockingTitleGenerator: IdeaTitleGenerating {
+    private let title: String
+    private var generationStarted = false
+    private var released = false
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseWaiter: CheckedContinuation<Void, Never>?
+
+    init(title: String) {
+        self.title = title
+    }
+
+    func availability(for localeIdentifier: String) async -> IdeaTitleGenerationAvailability {
+        .available
+    }
+
+    func generateTitle(for request: IdeaTitleGenerationRequest) async throws -> IdeaTitleGenerationResult {
+        generationStarted = true
+        let waiters = startWaiters
+        startWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+        if !released {
+            await withCheckedContinuation { continuation in
+                releaseWaiter = continuation
+            }
+        }
+        return IdeaTitleGenerationResult(title: title)
+    }
+
+    func waitUntilGenerationStarted() async {
+        guard !generationStarted else { return }
+        await withCheckedContinuation { continuation in
+            startWaiters.append(continuation)
+        }
+    }
+
+    func release() {
+        released = true
+        releaseWaiter?.resume()
+        releaseWaiter = nil
+    }
+}
+
+private actor TrackingTranscriptionService: TranscriptionService {
+    private let result: Transcript
+    private var calls = 0
+
+    init(transcript: Transcript) {
+        result = transcript
+    }
+
+    func transcript(for recording: Recording, hint: String) async throws -> Transcript {
+        calls += 1
+        return result
+    }
+
+    func callCount() -> Int {
+        calls
+    }
+}
+
+private actor BlockingTranscriptionService: TranscriptionService {
+    private let result: Result<Transcript, LocalSpeechTranscriptionError>
+    private var started = false
+    private var released = false
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseWaiter: CheckedContinuation<Void, Never>?
+
+    init(transcript: Transcript) {
+        result = .success(transcript)
+    }
+
+    init(error: LocalSpeechTranscriptionError) {
+        result = .failure(error)
+    }
+
+    func transcript(for recording: Recording, hint: String) async throws -> Transcript {
+        started = true
+        let waiters = startWaiters
+        startWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+        if !released {
+            await withCheckedContinuation { continuation in
+                releaseWaiter = continuation
+            }
+        }
+        return try result.get()
+    }
+
+    func waitUntilStarted() async {
+        guard !started else { return }
+        await withCheckedContinuation { continuation in
+            startWaiters.append(continuation)
+        }
+    }
+
+    func release() {
+        released = true
+        releaseWaiter?.resume()
+        releaseWaiter = nil
+    }
+}
+
+private actor SequencedTranscriptionService: TranscriptionService {
+    private var remaining: [Transcript]
+
+    init(transcripts: [Transcript]) {
+        remaining = transcripts
+    }
+
+    func transcript(for recording: Recording, hint: String) async throws -> Transcript {
+        guard !remaining.isEmpty else {
+            throw LocalSpeechTranscriptionError.emptyRecognition
+        }
+        return remaining.removeFirst()
+    }
+}
+
+private struct RecordingMappedTranscriptionService: TranscriptionService {
+    var transcripts: [String: Transcript]
+
+    func transcript(for recording: Recording, hint: String) async throws -> Transcript {
+        guard let transcript = transcripts[recording.id] else {
+            throw LocalSpeechTranscriptionError.emptyRecognition
+        }
+        return transcript
+    }
+}
+
+@MainActor
+private func singleRecordingProcessingFixture(
+    id: String,
+    title: String,
+    localFileStatus: RecordingFileStatus = .available,
+    syncStatus: SyncStatus = .pending,
+    transcriptText: String,
+    titleAvailability: IdeaTitleGenerationAvailability,
+    titleResult: Result<IdeaTitleGenerationResult, FixedTitleGenerationFailure>,
+    privacyMode: PrivacyMode = .privateLocal,
+    now: Date
+) -> (
+    store: IdeaForgeStore,
+    repository: RevisionTrackingWorkspaceRepository,
+    services: IdeaForgeServices
+) {
+    let projectID = "idea_\(id)"
+    let recording = processingTestRecording(
+        id: "rec_\(id)",
+        projectID: projectID,
+        localFileStatus: localFileStatus,
+        syncStatus: syncStatus,
+        localAudioPath: "recordings/\(id).m4a",
+        audioObjectKey: localFileStatus == .uploaded ? "audio/\(projectID)/rec_\(id).m4a" : nil,
+        now: now
+    )
+    let project = processingTestProject(
+        id: projectID,
+        title: title,
+        recordings: [recording],
+        transcript: Transcript(cleanText: "Queued.", segments: [], unclearFragments: []),
+        now: now
+    )
+    let repository = RevisionTrackingWorkspaceRepository()
+    return (
+        processingTestStore(project: project, repository: repository, privacyMode: privacyMode, now: now),
+        repository,
+        IdeaForgeServices(
+            transcription: SucceedingTranscriptionService(
+                transcript: Transcript(cleanText: transcriptText, segments: [], unclearFragments: [])
+            ),
+            titleGeneration: StubTitleGenerator(availability: titleAvailability, result: titleResult),
+            workflow: LocalWorkflowExecutionService(),
+            syncQueue: LocalSyncQueueService(),
+            export: LocalExportService()
+        )
+    )
+}
+
+private func processingTestRecording(
+    id: String,
+    projectID: String,
+    localFileStatus: RecordingFileStatus,
+    syncStatus: SyncStatus,
+    localAudioPath: String = "recordings/local-processing.m4a",
+    audioObjectKey: String? = nil,
+    now: Date
+) -> Recording {
+    Recording(
+        id: id,
+        ideaProjectID: projectID,
+        deviceName: "iPhone",
+        durationSeconds: 30,
+        localFileStatus: localFileStatus,
+        syncStatus: syncStatus,
+        localAudioPath: localAudioPath,
+        audioObjectKey: audioObjectKey,
+        languageHint: "en-US",
+        createdAt: now,
+        markerOffsets: []
+    )
+}
+
+private func processingTestProject(
+    id: String,
+    title: String,
+    recordings: [Recording],
+    transcript: Transcript,
+    now: Date
+) -> IdeaProject {
+    IdeaProject(
+        id: id,
+        title: title,
+        status: .inbox,
+        source: .iphone,
+        createdAt: now,
+        updatedAt: now,
+        summary: transcript.cleanText,
+        tags: [.appIdea],
+        score: IdeaScore(confidence: 0.2, completeness: 0.1, risk: 0.7),
+        transcript: transcript,
+        recordings: recordings,
+        questions: [],
+        artifacts: [],
+        assumptions: [],
+        validationExperiments: [],
+        codexTasks: []
+    )
+}
+
+private func processingTestServices(
+    transcription: any TranscriptionService,
+    titleGeneration: any IdeaTitleGenerating
+) -> IdeaForgeServices {
+    IdeaForgeServices(
+        transcription: transcription,
+        titleGeneration: titleGeneration,
+        workflow: LocalWorkflowExecutionService(),
+        syncQueue: LocalSyncQueueService(),
+        export: LocalExportService()
+    )
+}
+
+@MainActor
+private func processingTestStore(
+    project: IdeaProject,
+    repository: any WorkspaceRepository,
+    privacyMode: PrivacyMode = .privateLocal,
+    now: Date
+) -> IdeaForgeStore {
+    IdeaForgeStore(
+        projects: [project],
+        workflowTemplates: DefaultWorkflows.templates,
+        selectedProjectID: project.id,
+        privacyMode: privacyMode,
+        syncHealth: SyncHealth(
+            watchReachable: true,
+            queuedUploads: 0,
+            lastSuccessfulSync: now,
+            failingItems: 0
+        ),
+        repository: repository
+    )
+}
+
 private final class ThrowingWorkspaceRepository: WorkspaceRepository, @unchecked Sendable {
     private let state: WorkspaceState?
 
@@ -12396,6 +14666,43 @@ private struct StubSpeechAudioTranscriber: LocalSpeechAudioTranscribing {
 
     func transcribeAudio(at url: URL, localeIdentifier: String) async throws -> String {
         text
+    }
+}
+
+private final class StubLocalSpeechRecognitionRequest: LocalSpeechRecognitionRequestConfiguring {
+    var requiresOnDeviceRecognition = false
+}
+
+private actor BlockingLocalEnrichmentAvailabilityProbe {
+    private var started = false
+    private var released = false
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseWaiter: CheckedContinuation<Void, Never>?
+
+    func resolve() async -> IdeaTitleGenerationAvailability {
+        started = true
+        let waiters = startWaiters
+        startWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+        if !released {
+            await withCheckedContinuation { continuation in
+                releaseWaiter = continuation
+            }
+        }
+        return .deviceNotEligible
+    }
+
+    func waitUntilStarted() async {
+        guard !started else { return }
+        await withCheckedContinuation { continuation in
+            startWaiters.append(continuation)
+        }
+    }
+
+    func release() {
+        released = true
+        releaseWaiter?.resume()
+        releaseWaiter = nil
     }
 }
 

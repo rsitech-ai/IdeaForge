@@ -1,4 +1,6 @@
+import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 private enum MacWorkspaceLayout {
     static let inspectorBreakpoint: CGFloat = 840
@@ -19,6 +21,8 @@ struct MacContentView: View {
     @Environment(\.openSettings) private var openSettings
     @Bindable var store: IdeaForgeStore
     var navigationState: MacNavigationState
+    var backendConfigurationManager: BackendConfigurationManager
+    var backendLifecycle: MacLocalBackendLifecycleModel
     @State private var selectedSection: SidebarSection = .ideas
     @State private var query = ""
     @State private var recorder = LocalAudioRecorder()
@@ -26,7 +30,6 @@ struct MacContentView: View {
     @State private var isInspectorPresented = false
     @State private var workspaceDetailWidth: CGFloat = 0
     @State private var inboxRecoveryFocus: InboxStatusAction?
-    private let backendConfigurationManager = BackendConfigurationManager.production()
 
     private var filteredProjects: [IdeaProject] {
         guard !query.isEmpty else { return store.projects }
@@ -44,7 +47,8 @@ struct MacContentView: View {
                 syncHealth: store.syncHealth
             ),
             syncConflict: store.syncHealth.syncConflictStatus,
-            watchReachable: store.syncHealth.watchReachable
+            watchReachable: store.syncHealth.watchReachable,
+            includesWatchReachability: false
         )
     }
 
@@ -82,11 +86,29 @@ struct MacContentView: View {
             adaptiveWorkspaceDetail
         }
         .searchable(text: $query, placement: .sidebar, prompt: "Search ideas")
+        .tint(.forgeEmber)
         .task {
             await processDueWorkflowRetries()
         }
         .toolbar {
             ToolbarItemGroup {
+                if backendLifecycle.isVisible {
+                    Button {
+                        openSettings()
+                    } label: {
+                        Label(
+                            "Local Backend",
+                            systemImage: backendLifecycle.isReady
+                                ? "server.rack"
+                                : (backendLifecycle.isChecking ? "arrow.triangle.2.circlepath" : "server.rack")
+                        )
+                    }
+                    .labelStyle(.iconOnly)
+                    .accessibilityIdentifier("mac.toolbar.localBackendStatus")
+                    .accessibilityLabel("Local Backend")
+                    .accessibilityValue(backendLifecycle.statusMessage)
+                    .help(backendLifecycle.statusMessage)
+                }
                 Button {
                     store.selectedProjectID = nil
                     selectedSection = .inbox
@@ -310,6 +332,9 @@ struct MacContentView: View {
                     Task {
                         await store.exportCodexPacket()
                     }
+                },
+                onExportIdeaBrief: {
+                    exportIdeaBrief(project)
                 }
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -335,6 +360,23 @@ struct MacContentView: View {
                     inboxRecoveryFocus = nil
                 }
             )
+        }
+    }
+
+    private func exportIdeaBrief(_ project: IdeaProject) {
+        let brief = IdeaBriefExporter.brief(for: project)
+        let panel = NSSavePanel()
+        panel.title = "Export Idea as Markdown"
+        panel.nameFieldStringValue = brief.filename
+        panel.allowedContentTypes = [UTType(filenameExtension: "md") ?? .plainText]
+        panel.canCreateDirectories = true
+        guard panel.runModal() == .OK, let destination = panel.url else { return }
+        do {
+            try Data(brief.markdown.utf8).write(to: destination, options: [.atomic])
+            IdeaForgeLog.export.info("macOS Markdown idea brief exported")
+        } catch {
+            store.lastErrorMessage = "Markdown export failed. Choose another writable folder and try again."
+            IdeaForgeLog.export.error("macOS Markdown idea brief export failed")
         }
     }
 
@@ -686,6 +728,7 @@ struct WorkspaceSectionView: View {
                     VStack(alignment: .leading, spacing: 6) {
                         Label(section.label, systemImage: section.icon)
                             .font(.title2.weight(.semibold))
+                            .accessibilityIdentifier("mac.workspace.section.\(section.rawValue)")
                         Text(section.subtitle)
                             .font(.callout)
                             .foregroundStyle(.secondary)
@@ -693,15 +736,24 @@ struct WorkspaceSectionView: View {
 
                     switch section {
                     case .inbox:
-                        SummaryGrid(items: [
-                            ("Queued recordings", "\(queuedRecordings.count)", "arrow.triangle.2.circlepath"),
-                            ("Pending questions", "\(questions.count)", "questionmark.bubble"),
-                            ("Ideas", "\(projects.count)", "lightbulb")
-                        ])
-                        if !queuedRecordings.isEmpty {
-                            VStack(alignment: .leading, spacing: 10) {
+                        MacCaptureRelayOverview(recordings: queuedRecordings)
+                            .accessibilityIdentifier("mac.inbox.captureRelay")
+                        VStack(alignment: .leading, spacing: 10) {
+                            HStack {
                                 Label("Recording Queue", systemImage: "waveform.badge.mic")
                                     .font(.headline)
+                                    .accessibilityIdentifier("mac.inbox.recordingQueue")
+                                Spacer()
+                                Text("\(queuedRecordings.count)")
+                                    .font(.caption.monospacedDigit().weight(.semibold))
+                                    .foregroundStyle(.secondary)
+                            }
+                            if queuedRecordings.isEmpty {
+                                Text("No recordings are waiting on this Mac.")
+                                    .font(.callout)
+                                    .foregroundStyle(.secondary)
+                                    .padding(.vertical, 4)
+                            } else {
                                 ForEach(queuedRecordings) { recording in
                                     RecordingQueueSummaryRow(
                                         recording: recording,
@@ -710,10 +762,14 @@ struct WorkspaceSectionView: View {
                                     )
                                 }
                             }
-                            .accessibilityIdentifier(
-                                inboxRecoveryFocus.map { "mac.inbox.recovery.\($0.rawValue)" }
-                                    ?? "mac.inbox.recordingQueue"
-                            )
+                        }
+                        .overlay {
+                            if let inboxRecoveryFocus {
+                                Text("Recording recovery")
+                                    .frame(width: 1, height: 1)
+                                    .opacity(0.01)
+                                    .accessibilityIdentifier("mac.inbox.recovery.\(inboxRecoveryFocus.rawValue)")
+                            }
                         }
                     case .ideas:
                         SummaryGrid(items: projects.map { ($0.title, $0.status.label, "lightbulb") })
@@ -733,9 +789,118 @@ struct WorkspaceSectionView: View {
                 }
                 .padding(24)
                 .frame(maxWidth: 940, alignment: .leading)
-                .accessibilityIdentifier("mac.workspace.section.\(section.rawValue)")
             }
             .navigationTitle(section.label)
+        }
+    }
+}
+
+private struct MacCaptureRelayOverview: View {
+    var recordings: [Recording]
+
+    private var watchCount: Int {
+        recordings.filter { $0.deviceName.localizedCaseInsensitiveContains("watch") }.count
+    }
+
+    private var phoneCount: Int {
+        recordings.filter { $0.deviceName.localizedCaseInsensitiveContains("iphone") }.count
+    }
+
+    private var statusTitle: String {
+        recordings.isEmpty ? "Ready for synced captures" : "\(recordings.count) local capture\(recordings.count == 1 ? "" : "s") need the next step"
+    }
+
+    var body: some View {
+        HStack(spacing: 20) {
+            VStack(alignment: .leading, spacing: 7) {
+                Text("CAPTURE RELAY")
+                    .font(.caption.monospaced().weight(.bold))
+                    .tracking(1.2)
+                    .foregroundStyle(Color.forgeEmber)
+                Text(statusTitle)
+                    .font(.title3.weight(.semibold))
+                Text("Counts reflect recordings present in this Mac workspace—never an inferred device receipt.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Spacer(minLength: 12)
+
+            HStack(spacing: 12) {
+                VStack(alignment: .trailing, spacing: 8) {
+                    sourceRow(symbol: "applewatch", value: watchCount, label: "Watch source")
+                    sourceRow(symbol: "iphone", value: phoneCount, label: "iPhone source")
+                }
+                Image(systemName: "arrow.right")
+                    .font(.headline.weight(.semibold))
+                    .foregroundStyle(recordings.isEmpty ? Color.secondary.opacity(0.34) : Color.forgeEmber)
+                    .accessibilityHidden(true)
+                relayNode(symbol: "desktopcomputer", value: recordings.count, label: "This Mac")
+            }
+        }
+        .padding(18)
+        .background(
+            LinearGradient(
+                colors: [Color.forgeEmber.opacity(0.10), Color.forgeMagenta.opacity(0.045), Color.clear],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            ),
+            in: UnevenRoundedRectangle(
+                topLeadingRadius: 24,
+                bottomLeadingRadius: 10,
+                bottomTrailingRadius: 24,
+                topTrailingRadius: 10,
+                style: .continuous
+            )
+        )
+        .overlay {
+            UnevenRoundedRectangle(
+                topLeadingRadius: 24,
+                bottomLeadingRadius: 10,
+                bottomTrailingRadius: 24,
+                topTrailingRadius: 10,
+                style: .continuous
+            )
+            .strokeBorder(Color.forgeEmber.opacity(0.20), lineWidth: 1)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Capture relay")
+        .accessibilityValue(statusTitle)
+        .accessibilityIdentifier("mac.inbox.captureRelay")
+    }
+
+    private func relayNode(symbol: String, value: Int, label: String) -> some View {
+        VStack(spacing: 5) {
+            ZStack(alignment: .topTrailing) {
+                Image(systemName: symbol)
+                    .font(.title3.weight(.semibold))
+                    .foregroundStyle(value > 0 ? Color.black : Color.secondary)
+                    .frame(width: 42, height: 42)
+                    .background(value > 0 ? Color.forgeEmber : Color.secondary.opacity(0.10), in: Circle())
+                if value > 0 {
+                    Text("\(value)")
+                        .font(.caption2.monospacedDigit().weight(.bold))
+                        .foregroundStyle(.white)
+                        .padding(4)
+                        .background(.black, in: Circle())
+                        .offset(x: 4, y: -4)
+                }
+            }
+            Text(label)
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private func sourceRow(symbol: String, value: Int, label: String) -> some View {
+        HStack(spacing: 7) {
+            Text(value > 0 ? "\(value)" : "—")
+                .font(.caption.monospacedDigit().weight(.semibold))
+                .foregroundStyle(value > 0 ? Color.primary : Color.secondary)
+            Label(label, systemImage: symbol)
+                .font(.caption.weight(.medium))
+                .foregroundStyle(value > 0 ? Color.forgeEmber : Color.secondary)
         }
     }
 }
@@ -807,7 +972,7 @@ struct SummaryGrid: View {
     }
 
     private func accentColor(for index: Int) -> Color {
-        [.cyan, .indigo, .orange, .mint, .yellow, .teal][index % 6]
+        [.forgeEmber, .forgeCoral, .forgeMagenta, .forgeSpark, .mint, .purple][index % 6]
     }
 }
 
@@ -822,6 +987,22 @@ struct ProjectSidebarRow: View {
     var project: IdeaProject
     var isSelected = false
 
+    private var latestRecording: Recording? {
+        project.recordings.max { $0.createdAt < $1.createdAt }
+    }
+
+    private var visibleRecordingMetadata: String? {
+        guard let recording = latestRecording else { return nil }
+        let recordedAt = recording.createdAt.formatted(date: .abbreviated, time: .shortened)
+        return "\(recordedAt) · \(compactDuration(recording.durationSeconds)) · \(recording.syncStatus.label)"
+    }
+
+    private var accessibleRecordingMetadata: String? {
+        guard let recording = latestRecording else { return nil }
+        let recordedAt = recording.createdAt.formatted(date: .abbreviated, time: .shortened)
+        return "\(recording.deviceName), recorded \(recordedAt), \(recording.durationSeconds) seconds, \(recording.syncStatus.label)"
+    }
+
     var body: some View {
         Label {
             HStack(spacing: 8) {
@@ -829,6 +1010,12 @@ struct ProjectSidebarRow: View {
                     Text(project.title)
                         .font(.body.weight(isSelected ? .semibold : .regular))
                         .lineLimit(1)
+                    if let visibleRecordingMetadata {
+                        Text(visibleRecordingMetadata)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
                 }
                 Spacer(minLength: 8)
             }
@@ -837,7 +1024,18 @@ struct ProjectSidebarRow: View {
                 .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
                 .symbolRenderingMode(.hierarchical)
         }
-        .padding(.vertical, 3)
+        .padding(.vertical, latestRecording == nil ? 3 : 4)
+        .accessibilityElement(children: .combine)
         .accessibilityLabel(project.title)
+        .accessibilityValue(accessibleRecordingMetadata ?? project.status.label)
+    }
+
+    private func compactDuration(_ totalSeconds: Int) -> String {
+        let seconds = max(totalSeconds, 0)
+        let minutes = seconds / 60
+        let remainder = seconds % 60
+        if minutes == 0 { return "\(remainder)s" }
+        if remainder == 0 { return "\(minutes)m" }
+        return "\(minutes)m \(remainder)s"
     }
 }

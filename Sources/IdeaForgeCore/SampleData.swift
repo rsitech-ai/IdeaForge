@@ -9,8 +9,75 @@ public enum TaskFirstFixtureState: CaseIterable, Equatable, Sendable {
     case syncConflict
 }
 
+public enum WatchRelayFixtureState: String, CaseIterable, Equatable, Sendable {
+    case ready
+    case queued
+    case received
+    case failed
+}
+
 public enum SampleData {
     public static let now = Date(timeIntervalSince1970: 1_782_746_400)
+
+    public static func watchRelayStore(state: WatchRelayFixtureState) -> IdeaForgeStore {
+        let recordings: [Recording]
+        switch state {
+        case .ready:
+            recordings = []
+        case .queued, .received, .failed:
+            let syncStatus: SyncStatus = switch state {
+            case .queued: .pending
+            case .received: .transferredToIPhone
+            case .failed: .failed
+            case .ready: .pending
+            }
+            recordings = [
+                Recording(
+                    id: "watch-relay-\(state.rawValue)",
+                    ideaProjectID: "watch-relay-fixture",
+                    deviceName: "Apple Watch",
+                    durationSeconds: 42,
+                    localFileStatus: state == .failed ? .failed : .available,
+                    syncStatus: syncStatus,
+                    languageHint: "en",
+                    createdAt: now,
+                    markerOffsets: [12]
+                )
+            ]
+        }
+
+        let project = IdeaProject(
+            id: "watch-relay-fixture",
+            title: "A deliberately long capture title for layout validation",
+            status: .inbox,
+            source: .watch,
+            createdAt: now,
+            updatedAt: now,
+            summary: "Deterministic Watch relay fixture.",
+            tags: [.appIdea],
+            score: IdeaScore(confidence: 0.5, completeness: 0.5, risk: 0.5),
+            transcript: Transcript(cleanText: "", segments: [], unclearFragments: []),
+            recordings: recordings,
+            questions: [],
+            artifacts: [],
+            assumptions: [],
+            validationExperiments: [],
+            codexTasks: []
+        )
+        return IdeaForgeStore(
+            projects: [project],
+            workflowTemplates: DefaultWorkflows.templates,
+            selectedProjectID: project.id,
+            privacyMode: .privateLocal,
+            syncHealth: SyncHealth(
+                watchReachable: state != .queued,
+                queuedUploads: 0,
+                lastSuccessfulSync: now,
+                failingItems: state == .failed ? 1 : 0
+            ),
+            updatedAt: now
+        )
+    }
 
     public static func taskFirstStore(state: TaskFirstFixtureState) -> IdeaForgeStore {
         switch state {
@@ -25,6 +92,72 @@ public enum SampleData {
         case .syncConflict:
             return syncConflictStore()
         }
+    }
+
+    public static func nonRetryableTranscriptFailureStore() -> IdeaForgeStore {
+        let recording = Recording(
+            id: "rec_nonretryable_transcript",
+            ideaProjectID: "idea_nonretryable_transcript",
+            deviceName: "Apple Watch",
+            durationSeconds: 16,
+            localFileStatus: .uploaded,
+            syncStatus: .failed,
+            localAudioPath: taskFirstFixtureAudioPath(),
+            audioObjectKey: "audio/idea_nonretryable_transcript/rec_nonretryable_transcript.m4a",
+            languageHint: "en",
+            createdAt: now,
+            markerOffsets: [],
+            processingDiagnostic: RecordingProcessingDiagnostic(
+                code: .localSpeechUnavailable,
+                message: "Speech recognition did not return usable text.",
+                isRetryable: false,
+                failedAt: now
+            )
+        )
+        let placeholder = "Voice idea transferred from Apple Watch."
+        let project = IdeaProject(
+            id: "idea_nonretryable_transcript",
+            title: "Watch Idea",
+            status: .inbox,
+            source: .watch,
+            createdAt: now,
+            updatedAt: now,
+            summary: placeholder,
+            tags: [.appIdea],
+            score: IdeaScore(confidence: 0.2, completeness: 0.1, risk: 0.7),
+            transcript: Transcript(
+                cleanText: placeholder,
+                segments: [
+                    TranscriptSegment(
+                        id: "segment_\(recording.id)",
+                        startSeconds: 0,
+                        endSeconds: 16,
+                        text: placeholder,
+                        isMarkedImportant: false
+                    )
+                ],
+                unclearFragments: []
+            ),
+            recordings: [recording],
+            questions: [],
+            artifacts: [],
+            assumptions: [],
+            validationExperiments: [],
+            codexTasks: []
+        )
+        return IdeaForgeStore(
+            projects: [project],
+            workflowTemplates: DefaultWorkflows.templates,
+            selectedProjectID: project.id,
+            privacyMode: .standardCloud,
+            syncHealth: SyncHealth(
+                watchReachable: true,
+                queuedUploads: 0,
+                lastSuccessfulSync: now,
+                failingItems: 1
+            ),
+            updatedAt: now
+        )
     }
 
     public static func store() -> IdeaForgeStore {

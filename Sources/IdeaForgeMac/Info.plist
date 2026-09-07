@@ -20,6 +20,12 @@
   <string>14.0</string>
   <key>NSMicrophoneUsageDescription</key>
   <string>IdeaForge can capture voice ideas when you start a recording on this Mac.</string>
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>IdeaForge discovers and connects to your private Local Backend on this network.</string>
+  <key>NSBonjourServices</key>
+  <array>
+    <string>_ideaforge._tcp</string>
+  </array>
   <key>NSSpeechRecognitionUsageDescription</key>
   <string>IdeaForge can transcribe local voice recordings when you choose local speech recognition.</string>
   <key>NSPrincipalClass</key>

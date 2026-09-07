@@ -1,5 +1,13 @@
 import SwiftUI
 
+extension Color {
+    static let forgeAubergine = Color(red: 0.17, green: 0.025, blue: 0.23)
+    static let forgeEmber = Color(red: 1.00, green: 0.48, blue: 0.08)
+    static let forgeCoral = Color(red: 1.00, green: 0.18, blue: 0.25)
+    static let forgeMagenta = Color(red: 0.86, green: 0.06, blue: 0.34)
+    static let forgeSpark = Color(red: 1.00, green: 0.95, blue: 0.72)
+}
+
 struct MacAmbientBackdrop: View {
     var isActive: Bool
     var tint: Color
@@ -10,8 +18,8 @@ struct MacAmbientBackdrop: View {
                 colors: [
                     Color(nsColor: .windowBackgroundColor),
                     tint.opacity(isActive ? 0.14 : 0.09),
-                    Color.indigo.opacity(isActive ? 0.09 : 0.06),
-                    Color.orange.opacity(isActive ? 0.06 : 0.04),
+                    Color.forgeAubergine.opacity(isActive ? 0.14 : 0.09),
+                    Color.forgeEmber.opacity(isActive ? 0.08 : 0.045),
                     Color(nsColor: .controlBackgroundColor)
                 ],
                 startPoint: .topLeading,
@@ -150,7 +158,7 @@ struct MacSignalField: View {
 }
 
 struct MacInputSurface: ViewModifier {
-    var tint: Color = .indigo
+    var tint: Color = .forgeAubergine
     var cornerRadius: CGFloat = 13
 
     func body(content: Content) -> some View {
@@ -164,7 +172,7 @@ struct MacInputSurface: ViewModifier {
 }
 
 extension View {
-    func macInputSurface(tint: Color = .indigo, cornerRadius: CGFloat = 13) -> some View {
+    func macInputSurface(tint: Color = .forgeAubergine, cornerRadius: CGFloat = 13) -> some View {
         modifier(MacInputSurface(tint: tint, cornerRadius: cornerRadius))
     }
 }
@@ -501,11 +509,11 @@ extension WorkspaceLiveHealthTone {
     var macTint: Color {
         switch self {
         case .ready: .mint
-        case .active: .cyan
+        case .active: .forgeEmber
         case .needsReview: .orange
         case .syncConflict: .red
         case .offline: .secondary
-        case .localFirst: .indigo
+        case .localFirst: .forgeAubergine
         }
     }
 }
@@ -515,7 +523,7 @@ struct MacToolbarLiveStatus: View {
     var isRecording: Bool
 
     private var tint: Color {
-        isRecording ? .orange : snapshot.liveHealthTone.macTint
+        isRecording ? .forgeCoral : snapshot.liveHealthTone.macTint
     }
 
     private var symbolName: String {
@@ -848,11 +856,11 @@ struct MacSignalRibbon: View {
 extension SidebarSection {
     var accentColor: Color {
         switch self {
-        case .inbox: .cyan
+        case .inbox: .forgeEmber
         case .ideas: .yellow
-        case .workflows: .indigo
+        case .workflows: .forgeMagenta
         case .templates: .mint
-        case .exports: .orange
+        case .exports: .forgeCoral
         case .integrations: .teal
         }
     }
@@ -883,9 +891,9 @@ extension SidebarSection {
 extension IdeaProject {
     var macTint: Color {
         switch source {
-        case .watch: .cyan
-        case .iphone: .orange
-        case .mac: .indigo
+        case .watch: .forgeEmber
+        case .iphone: .forgeCoral
+        case .mac: .forgeMagenta
         case .importFile: .mint
         }
     }

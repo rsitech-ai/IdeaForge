@@ -45,7 +45,12 @@ public struct InboxStatusSnapshot: Equatable, Sendable {
         self.action = action
     }
 
-    public init?(uploadSummary: CanonicalUploadSummary, syncConflict: WorkspaceSyncConflictStatus?, watchReachable: Bool) {
+    public init?(
+        uploadSummary: CanonicalUploadSummary,
+        syncConflict: WorkspaceSyncConflictStatus?,
+        watchReachable: Bool,
+        includesWatchReachability: Bool = true
+    ) {
         if syncConflict != nil {
             self.init(kind: .syncConflict, title: "Sync conflict", action: .resolve)
         } else if uploadSummary.permanentlyFailedCount > 0 {
@@ -54,7 +59,7 @@ public struct InboxStatusSnapshot: Equatable, Sendable {
         } else if uploadSummary.queuedCount > 0 {
             let count = uploadSummary.queuedCount
             self.init(kind: .queuedUpload, title: "\(count) recording\(count == 1 ? "" : "s") waiting", action: .upload)
-        } else if !watchReachable {
+        } else if includesWatchReachability && !watchReachable {
             self.init(kind: .offline, title: "Watch offline", action: nil)
         } else {
             return nil
@@ -66,6 +71,7 @@ public enum RecordingRowState: String, Equatable, Sendable {
     case onWatch = "On Watch"
     case onIPhone = "On iPhone"
     case readyToUpload = "Ready to upload"
+    case awaitingTranscript = "Awaiting transcript"
     case uploading = "Uploading"
     case retryScheduled = "Retry scheduled"
     case failed = "Failed"
@@ -98,7 +104,7 @@ public struct RecordingRowSnapshot: Identifiable, Equatable, Sendable {
         } else if recording.syncStatus == .ready || recording.syncStatus == .transcribing {
             state = .transcribed
         } else if recording.syncStatus == .uploaded {
-            state = .readyToUpload
+            state = .awaitingTranscript
         } else if recording.syncStatus == .transferredToIPhone {
             state = .onIPhone
         } else if recording.deviceName.localizedCaseInsensitiveContains("watch") {

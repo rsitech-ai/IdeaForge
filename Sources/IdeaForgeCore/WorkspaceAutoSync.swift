@@ -313,18 +313,19 @@ public struct ConfiguredWorkspaceAutoSyncProcessor: Sendable {
             )
             return .skipped(.syncConflict, conflict.report.message)
         } catch {
+            let diagnostic = WorkspaceSyncFailureDiagnostic.classify(error)
             store.recordSyncActivity(
                 WorkspaceSyncActivityReceipt(
                     source: .backgroundAutoSync,
                     status: .failed,
-                    title: "Auto-sync failed",
-                    detail: WorkspaceAutoSyncBlocker.requestFailed.userFacingMessage,
+                    title: diagnostic.receiptTitle,
+                    detail: diagnostic.userFacingMessage,
                     occurredAt: syncedAt
                 )
             )
             return .skipped(
                 .requestFailed,
-                WorkspaceAutoSyncBlocker.requestFailed.userFacingMessage
+                diagnostic.userFacingMessage
             )
         }
     }

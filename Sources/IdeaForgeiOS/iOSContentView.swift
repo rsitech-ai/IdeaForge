@@ -3,6 +3,14 @@ import StoreKit
 import SwiftUI
 import UIKit
 
+extension Color {
+    static let forgeAubergine = Color(red: 0.17, green: 0.025, blue: 0.23)
+    static let forgeEmber = Color(red: 1.00, green: 0.48, blue: 0.08)
+    static let forgeCoral = Color(red: 1.00, green: 0.18, blue: 0.25)
+    static let forgeMagenta = Color(red: 0.86, green: 0.06, blue: 0.34)
+    static let forgeSpark = Color(red: 1.00, green: 0.95, blue: 0.72)
+}
+
 enum AccountDestination: Hashable {
     case syncConflict
     case failedUploads
@@ -10,8 +18,6 @@ enum AccountDestination: Hashable {
 
 enum AppTab: String, CaseIterable, Identifiable {
     case inbox
-    case ideas
-    case questions
     case account
 
     var id: String { rawValue }
@@ -19,45 +25,35 @@ enum AppTab: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .inbox: "Inbox"
-        case .ideas: "Ideas"
-        case .questions: "Questions"
-        case .account: "Account"
+        case .account: "Settings"
         }
     }
 
     var symbol: String {
         switch self {
         case .inbox: "tray"
-        case .ideas: "lightbulb"
-        case .questions: "questionmark.bubble"
-        case .account: "person.crop.circle"
+        case .account: "gearshape"
         }
     }
 
     var selectedSymbol: String {
         switch self {
         case .inbox: "tray.fill"
-        case .ideas: "lightbulb.fill"
-        case .questions: "questionmark.bubble.fill"
-        case .account: "person.crop.circle.fill"
+        case .account: "gearshape.fill"
         }
     }
 
     var accessibilityHint: String {
         switch self {
         case .inbox: "Shows recordings and capture controls"
-        case .ideas: "Shows idea projects"
-        case .questions: "Shows questions waiting for answers"
-        case .account: "Shows account, sync, upload, and integration controls"
+        case .account: "Shows sync, privacy, connection, and app settings"
         }
     }
 
     var accentColor: Color {
         switch self {
-        case .inbox: .cyan
-        case .ideas: .orange
-        case .questions: .indigo
-        case .account: .teal
+        case .inbox: .forgeEmber
+        case .account: .forgeMagenta
         }
     }
 }
@@ -67,9 +63,12 @@ struct iOSContentView: View {
     @Bindable var store: IdeaForgeStore
     private let backendConfigurationManager: BackendConfigurationManager
     private let uploadProcessingCoordinator: UploadQueueProcessingCoordinator
+    private let recordingTransferService: any RecordingTransferService
     private let commerceService: any CommerceServicing
     @ObservedObject private var pushNotificationTokenCenter: PushNotificationTokenCenter
     @State private var selectedTab: AppTab = .inbox
+    @State private var isShowingRecovery = false
+    @State private var isShowingMacConnection = false
     @State private var requestedAccountDestination: AccountDestination?
     @State private var recorder: LocalAudioRecorder
     @State private var isRecording = false
@@ -77,10 +76,13 @@ struct iOSContentView: View {
     @State private var isSyncingWorkspace = false
     @State private var isProcessingAI = false
     @State private var isProcessingLocalSpeech = false
+    @State private var localEnrichmentStatusGate = LocalEnrichmentStatusGate()
     @State private var backendSettings = BackendConnectionSettings()
     @State private var backendTokenEntry = ""
+    @State private var localBackendPairingCode = ""
+    @State private var isPairingLocalBackend = false
     @State private var backendStatusMessage = "Local upload fallback active."
-    @State private var localSpeechStatusMessage = "Local speech ready for recordings kept on this iPhone."
+    @State private var localSpeechStatusMessage = "Transcript: ready for local recordings. Title: checking Foundation Models availability."
     @State private var authenticatedSession: BackendAuthenticatedSession?
     @State private var authStatusMessage = "Backend session not validated."
     @State private var isValidatingAuthSession = false
@@ -102,12 +104,14 @@ struct iOSContentView: View {
         store: IdeaForgeStore,
         backendConfigurationManager: BackendConfigurationManager = .production(),
         uploadProcessingCoordinator: UploadQueueProcessingCoordinator,
+        recordingTransferService: any RecordingTransferService = UnavailableRecordingTransferService(),
         commerceService: (any CommerceServicing)? = nil,
         pushNotificationTokenCenter: PushNotificationTokenCenter
     ) {
         self.store = store
         self.backendConfigurationManager = backendConfigurationManager
         self.uploadProcessingCoordinator = uploadProcessingCoordinator
+        self.recordingTransferService = recordingTransferService
         self.commerceService = commerceService ?? Self.defaultCommerceService()
         _pushNotificationTokenCenter = ObservedObject(wrappedValue: pushNotificationTokenCenter)
         _recorder = State(initialValue: Self.defaultRecorder())
@@ -225,14 +229,19 @@ struct iOSContentView: View {
     }
 
     var body: some View {
-        TabView(selection: $selectedTab) {
-            NavigationStack {
-                RecordingInboxView(
+        NavigationStack {
+            RecordingInboxView(
                     store: store,
                     status: inboxStatus,
                     rows: recordingRows,
+                    snapshot: dashboard,
+                    syncReadiness: syncReadiness,
+                    syncPlan: workspaceSyncPlan,
+                    syncTrust: syncTrust,
                     isRecording: isRecording,
-                    isProcessingUploads: isProcessingUploads
+                    isProcessingUploads: isProcessingUploads,
+                    isSyncingWorkspace: isSyncingWorkspace,
+                    syncStatusMessage: backendStatusMessage
                 ) {
                     Task {
                         await toggleRecording()
@@ -241,24 +250,14 @@ struct iOSContentView: View {
                     handleInboxStatusAction(action)
                 } onRetryUpload: { recordingID in
                     retryPersistedUpload(recordingID: recordingID)
+                } onRefresh: {
+                    await syncAllDevices()
+                } onSync: {
+                    Task { await syncAllDevices() }
+                } onConnectMac: {
+                    isShowingMacConnection = true
                 }
-            }
-            .tabItem { tabLabel(for: .inbox) }
-            .tag(AppTab.inbox)
-
-            NavigationStack {
-                ProjectListView(store: store, snapshot: dashboard)
-            }
-            .tabItem { tabLabel(for: .ideas) }
-            .tag(AppTab.ideas)
-
-            NavigationStack {
-                QuestionsReviewView(store: store)
-            }
-            .tabItem { tabLabel(for: .questions) }
-            .tag(AppTab.questions)
-
-            NavigationStack {
+            .navigationDestination(isPresented: $isShowingRecovery) {
                 AccountHubView(
                     store: store,
                     requestedDestination: $requestedAccountDestination,
@@ -268,6 +267,7 @@ struct iOSContentView: View {
                     syncTrust: syncTrust,
                     backendSettings: $backendSettings,
                     backendTokenEntry: $backendTokenEntry,
+                    localBackendPairingCode: $localBackendPairingCode,
                     backendStatusMessage: backendStatusMessage,
                     localSpeechStatusMessage: localSpeechStatusMessage,
                     authenticatedSession: authenticatedSession,
@@ -283,16 +283,20 @@ struct iOSContentView: View {
                     isProcessingAI: isProcessingAI,
                     isProcessingLocalSpeech: isProcessingLocalSpeech,
                     isValidatingAuthSession: isValidatingAuthSession,
+                    isPairingLocalBackend: isPairingLocalBackend,
                     isRefreshingAccountUsage: isRefreshingAccountUsage,
                     isLoadingCommerce: isLoadingCommerce,
                     isPurchasingCommerce: isPurchasingCommerce,
                     isRestoringCommerce: isRestoringCommerce,
                     isRegisteringPushNotifications: isRegisteringPushNotifications,
                     onSaveBackend: saveBackendConfiguration,
+                    onPairLocalBackend: {
+                        Task { await pairLocalBackend() }
+                    },
                     onClearBackendCredentials: clearBackendCredentials,
                     onSyncWorkspace: {
                         Task {
-                            await syncBackendWorkspace()
+                            await syncAllDevices()
                         }
                     },
                     onRefreshWorkspace: {
@@ -360,13 +364,34 @@ struct iOSContentView: View {
                     },
                     onRetryUpload: { recordingID in
                         retryPersistedUpload(recordingID: recordingID)
+                    },
+                    onKeepWithoutTranscript: { recordingID in
+                        guard store.keepRecordingWithoutTranscript(recordingID: recordingID) else { return }
+                        localSpeechStatusMessage = "Audio kept without a transcript. Placeholder text was removed."
+                        Task {
+                            await publishEnrichedWorkspaceIfConfigured()
+                        }
                     }
                 )
+                .onDisappear {
+                    selectedTab = .inbox
+                }
             }
-            .tabItem { tabLabel(for: .account) }
-            .tag(AppTab.account)
         }
-        .tint(selectedTab.accentColor)
+        .sheet(isPresented: $isShowingMacConnection) {
+            MacConnectionView(
+                pairingCode: $localBackendPairingCode,
+                statusMessage: backendStatusMessage,
+                isPairing: isPairingLocalBackend,
+                onPair: {
+                    Task { await pairLocalBackend() }
+                }
+            )
+        }
+        .task {
+            await refreshLocalEnrichmentAvailability()
+        }
+        .tint(.forgeEmber)
         .background {
             MobileAmbientBackdrop(
                 tint: selectedTab.accentColor,
@@ -432,19 +457,6 @@ struct iOSContentView: View {
             isAwaitingPushDeviceToken = false
             pushNotificationStatusMessage = message
         }
-    }
-
-    @ViewBuilder
-    private func tabLabel(for tab: AppTab) -> some View {
-        Label {
-            Text(tab.title)
-        } icon: {
-            Image(systemName: selectedTab == tab ? tab.selectedSymbol : tab.symbol)
-                .symbolRenderingMode(.hierarchical)
-                .foregroundStyle(selectedTab == tab ? tab.accentColor : .secondary)
-        }
-        .accessibilityLabel(tab.title)
-        .accessibilityHint(tab.accessibilityHint)
     }
 
     private var liveStatusStripIsVisible: Bool {
@@ -539,9 +551,11 @@ struct iOSContentView: View {
         case .resolve:
             requestedAccountDestination = .syncConflict
             selectedTab = .account
+            isShowingRecovery = true
         case .review:
             requestedAccountDestination = .failedUploads
             selectedTab = .account
+            isShowingRecovery = true
         case .upload:
             Task {
                 await processUploadQueue()
@@ -631,13 +645,21 @@ struct iOSContentView: View {
             if !backendSettings.isEnabled {
                 backendStatusMessage = "Local upload fallback active."
             } else if !backendSettings.hasValidBaseURL {
-                backendStatusMessage = "Remote upload needs a valid https:// URL."
+                backendStatusMessage = backendSettings.connectionKind == .localBackend
+                    ? "Local Backend needs a private-LAN https:// URL."
+                    : "Remote upload needs a valid https:// URL."
             } else if backendSettings.normalizedWorkspaceID.isEmpty {
-                backendStatusMessage = "Remote upload needs a workspace ID."
+                backendStatusMessage = backendSettings.connectionKind == .localBackend
+                    ? "Local Backend needs pairing."
+                    : "Remote upload needs a workspace ID."
             } else if hasToken {
-                backendStatusMessage = "Remote upload configured."
+                backendStatusMessage = backendSettings.connectionKind == .localBackend
+                    ? "Local Backend configured on your private LAN."
+                    : "Remote upload configured."
             } else {
-                backendStatusMessage = "Remote upload needs a bearer token."
+                backendStatusMessage = backendSettings.connectionKind == .localBackend
+                    ? "Local Backend needs pairing."
+                    : "Remote upload needs a bearer token."
             }
             IdeaForgeLog.settings.info("Backend settings loaded; enabled: \(backendSettings.isEnabled, privacy: .public)")
         } catch {
@@ -670,6 +692,49 @@ struct iOSContentView: View {
         } catch {
             backendStatusMessage = "Backend settings could not be saved."
             IdeaForgeLog.settings.error("Backend settings could not be saved")
+        }
+    }
+
+    @MainActor
+    private func pairLocalBackend() async {
+        guard !isPairingLocalBackend else { return }
+        guard backendSettings.connectionKind == .localBackend,
+              let baseURL = backendSettings.normalizedBaseURL,
+              BackendEndpointPolicy.allowsLocalBackend(baseURL) else {
+            backendStatusMessage = "Enter a valid private-LAN https:// endpoint."
+            return
+        }
+        let code = localBackendPairingCode.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !code.isEmpty else {
+            backendStatusMessage = "Enter the five-minute pairing code from the Mac."
+            return
+        }
+        isPairingLocalBackend = true
+        defer { isPairingLocalBackend = false }
+        do {
+            let credential = try await LocalBackendPairingClient(
+                configuration: LocalBackendPairingConfiguration(baseURL: baseURL)
+            ).pair(code: code, deviceLabel: UIDevice.current.name)
+            try backendConfigurationManager.saveLocalPairing(
+                baseURL: baseURL,
+                credential: credential
+            )
+            localBackendPairingCode = ""
+            backendTokenEntry = ""
+            authenticatedSession = nil
+            loadBackendConfiguration()
+            backendStatusMessage = "Local Backend paired. Validate the session, then sync."
+        } catch let error as LocalBackendPairingError {
+            switch error {
+            case .rejected:
+                backendStatusMessage = "Pairing code is invalid, expired, or already used."
+            case .invalidResponse:
+                backendStatusMessage = "Local Backend returned an invalid pairing response."
+            }
+        } catch let error as URLError where error.code == .serverCertificateUntrusted {
+            backendStatusMessage = "Certificate is not trusted. Install and trust the Local Backend CA."
+        } catch {
+            backendStatusMessage = "Local Backend pairing failed. Check LAN reachability and certificate setup."
         }
     }
 
@@ -786,17 +851,162 @@ struct iOSContentView: View {
             )
             IdeaForgeLog.sync.error("Workspace backend sync blocked by conflict; local upload jobs: \(conflict.report.localOnlyUploadJobIDs.count, privacy: .public), local recordings: \(conflict.report.localOnlyRecordingIDs.count, privacy: .public)")
         } catch {
-            backendStatusMessage = "Workspace sync failed."
+            let diagnostic = WorkspaceSyncFailureDiagnostic.classify(error)
+            backendStatusMessage = diagnostic.userFacingMessage
             store.recordSyncActivity(
                 WorkspaceSyncActivityReceipt(
                     source: .manualPublish,
                     status: .failed,
-                    title: "Publish failed",
+                    title: diagnostic.receiptTitle,
+                    detail: diagnostic.userFacingMessage,
+                    occurredAt: Date()
+                )
+            )
+            IdeaForgeLog.sync.error("Workspace backend sync failed; category: \(diagnostic.category.rawValue, privacy: .public)")
+        }
+    }
+
+    /// One user action for the complete iPhone handoff: recover/imported audio,
+    /// upload, reconcile with the Mac-owned workspace, then queue the compact
+    /// title/status projection for WatchConnectivity background delivery.
+    private func syncAllDevices() async {
+        guard !isSyncingWorkspace, !isProcessingUploads else { return }
+        isSyncingWorkspace = true
+        isProcessingUploads = true
+        IdeaForgeLog.sync.info("Manual all-device sync started")
+        defer {
+            isProcessingUploads = false
+            isSyncingWorkspace = false
+        }
+
+        recordingTransferService.activate()
+        store.recoverInterruptedUploads()
+
+        do {
+            guard let authConfiguration = try backendConfigurationManager.resolvedAuthConfiguration(),
+                  let syncConfiguration = try backendConfigurationManager.resolvedSyncConfiguration() else {
+                backendStatusMessage = "Sync Now needs a paired Local Backend workspace."
+                store.recordSyncActivity(
+                    WorkspaceSyncActivityReceipt(
+                        source: .manualPublish,
+                        status: .blocked,
+                        title: "Sync Now paused",
+                        detail: backendStatusMessage,
+                        occurredAt: Date()
+                    )
+                )
+                return
+            }
+
+            let session = try await BackendAuthSessionClient(
+                configuration: authConfiguration
+            ).validateSession()
+            authenticatedSession = session
+            let capabilityDecision = BackendCapabilityGate(session: session).decision(
+                requiredCapabilities: [.syncWorkspace, .uploadRecordings],
+                expectedWorkspaceID: syncConfiguration.workspaceID
+            )
+            guard capabilityDecision.isAllowed else {
+                backendStatusMessage = "Sync Now is waiting for backend access. \(capabilityDecision.blockerSummary)"
+                store.recordSyncActivity(
+                    WorkspaceSyncActivityReceipt(
+                        source: .manualPublish,
+                        status: .blocked,
+                        title: "Sync Now paused",
+                        detail: backendStatusMessage,
+                        occurredAt: Date()
+                    )
+                )
+                return
+            }
+
+            let backgroundOutcome = await BackgroundUploadCoordinator(
+                store: store,
+                backendConfigurationManager: backendConfigurationManager,
+                uploadProcessingCoordinator: uploadProcessingCoordinator
+            ).runRefresh()
+            guard backgroundOutcome == .completed else {
+                backendStatusMessage = "Sync Now could not upload pending recordings. Your audio remains saved and retryable."
+                store.recordSyncActivity(
+                    WorkspaceSyncActivityReceipt(
+                        source: .manualPublish,
+                        status: .failed,
+                        title: "Recording upload failed",
+                        detail: backendStatusMessage,
+                        occurredAt: Date()
+                    )
+                )
+                return
+            }
+
+            let summary = try await WorkspaceSyncEngine(
+                client: BackendWorkspaceSyncClient(configuration: syncConfiguration)
+            ).synchronize(store: store)
+            let watchProjection = WatchEnrichmentProjection(projects: store.projects)
+            try recordingTransferService.publish(watchProjection)
+
+            let readyWatchCount = watchProjection.items.filter { $0.state == .ready }.count
+            backendStatusMessage = readyWatchCount > 0
+                ? "Workspace synced with the backend; \(readyWatchCount) Watch title update\(readyWatchCount == 1 ? "" : "s") queued."
+                : "Workspace synced with the backend. Open the Mac app to process pending recordings."
+            store.recordSyncActivity(
+                WorkspaceSyncActivityReceipt(
+                    source: .manualPublish,
+                    status: summary.appliedRemoteSnapshot || summary.pushedLocalSnapshot ? .success : .skipped,
+                    title: summary.appliedRemoteSnapshot || summary.pushedLocalSnapshot ? "Workspace synced" : "Workspace current",
+                    detail: backendStatusMessage,
+                    occurredAt: Date()
+                ),
+                clearsLastError: true
+            )
+            IdeaForgeLog.sync.info("Manual all-device sync completed; Watch projection count: \(watchProjection.items.count, privacy: .public)")
+        } catch BackendConfigurationError.invalidBaseURL {
+            backendStatusMessage = "Sync Now needs a valid private-LAN https:// backend URL."
+            store.recordSyncActivity(
+                WorkspaceSyncActivityReceipt(
+                    source: .manualPublish,
+                    status: .blocked,
+                    title: "Backend address invalid",
                     detail: backendStatusMessage,
                     occurredAt: Date()
                 )
             )
-            IdeaForgeLog.sync.error("Workspace backend sync failed")
+        } catch let conflict as WorkspaceSyncConflictError {
+            backendStatusMessage = conflict.report.message
+            requestedAccountDestination = .syncConflict
+            store.recordSyncActivity(
+                WorkspaceSyncActivityReceipt(
+                    source: .manualPublish,
+                    status: .blocked,
+                    title: "Sync needs review",
+                    detail: conflict.report.message,
+                    occurredAt: Date()
+                )
+            )
+        } catch RecordingTransferError.unsupportedPlatform {
+            backendStatusMessage = "iPhone and Mac synced. Watch title delivery is unavailable on this device."
+            store.recordSyncActivity(
+                WorkspaceSyncActivityReceipt(
+                    source: .manualPublish,
+                    status: .blocked,
+                    title: "Watch update unavailable",
+                    detail: backendStatusMessage,
+                    occurredAt: Date()
+                )
+            )
+        } catch {
+            let diagnostic = WorkspaceSyncFailureDiagnostic.classify(error)
+            backendStatusMessage = diagnostic.userFacingMessage
+            store.recordSyncActivity(
+                WorkspaceSyncActivityReceipt(
+                    source: .manualPublish,
+                    status: .failed,
+                    title: diagnostic.receiptTitle,
+                    detail: diagnostic.userFacingMessage,
+                    occurredAt: Date()
+                )
+            )
+            IdeaForgeLog.sync.error("Manual all-device sync failed; category: \(diagnostic.category.rawValue, privacy: .public)")
         }
     }
 
@@ -966,6 +1176,12 @@ struct iOSContentView: View {
             authStatusMessage = "Enter a valid https:// backend URL."
             authenticatedSession = nil
             IdeaForgeLog.settings.error("iOS backend session validation failed; invalid backend URL")
+        } catch BackendAuthError.unauthorized {
+            try? backendConfigurationManager.clearCredentials()
+            authStatusMessage = "Device token was rejected or revoked. Pair this iPhone again."
+            backendStatusMessage = "Local Backend pairing is no longer valid."
+            authenticatedSession = nil
+            IdeaForgeLog.settings.error("iOS backend device authorization was rejected")
         } catch {
             authStatusMessage = "Backend session validation failed."
             authenticatedSession = nil
@@ -1026,20 +1242,107 @@ struct iOSContentView: View {
 
     private func processLocalSpeechTranscription() async {
         guard !isProcessingLocalSpeech else { return }
+        localEnrichmentStatusGate.invalidateForEnrichmentOutcome()
         isProcessingLocalSpeech = true
-        localSpeechStatusMessage = "Local speech transcription is running."
+        localSpeechStatusMessage = "Transcript: processing on this device. Title: waits for a completed transcript."
         IdeaForgeLog.workflow.info("iOS local speech transcription started")
         defer { isProcessingLocalSpeech = false }
 
-        let summary = await store.processLocalRecordingsForSpeechTranscription(services: .localSpeech)
-        if summary.attemptedCount == 0 {
-            localSpeechStatusMessage = "No local iPhone or Watch recordings are ready for speech."
-        } else if summary.failedCount > 0 {
-            localSpeechStatusMessage = "\(summary.completedCount) local transcript ready, \(summary.failedCount) needs review."
-        } else {
-            localSpeechStatusMessage = "\(summary.completedCount) local transcript ready."
+        let services: IdeaForgeServices = localEnrichmentRuntimePolicy.usesDeterministicTranscription
+            ? .local
+            : .localSpeech
+        let summary = await store.processLocalRecordingsForSpeechTranscription(services: services)
+        localEnrichmentStatusGate.invalidateForEnrichmentOutcome()
+        localSpeechStatusMessage = LocalEnrichmentPresentation.outcomeMessage(summary)
+        if summary.completedCount > 0 {
+            await publishEnrichedWorkspaceIfConfigured()
         }
         IdeaForgeLog.workflow.info("iOS local speech transcription completed; attempted: \(summary.attemptedCount, privacy: .public), completed: \(summary.completedCount, privacy: .public), failed: \(summary.failedCount, privacy: .public)")
+    }
+
+    private func processLocalSpeechTranscription(recordingID: String) async {
+        guard !isProcessingLocalSpeech else { return }
+        localEnrichmentStatusGate.invalidateForEnrichmentOutcome()
+        isProcessingLocalSpeech = true
+        localSpeechStatusMessage = "Transcribing this recording and preparing its title."
+        IdeaForgeLog.workflow.info("iOS recording-local speech transcription started")
+        defer { isProcessingLocalSpeech = false }
+
+        let services: IdeaForgeServices = localEnrichmentRuntimePolicy.usesDeterministicTranscription
+            ? .local
+            : .localSpeech
+        let summary = await store.processLocalRecordingForSpeechTranscription(
+            recordingID: recordingID,
+            services: services
+        )
+        localEnrichmentStatusGate.invalidateForEnrichmentOutcome()
+        localSpeechStatusMessage = LocalEnrichmentPresentation.outcomeMessage(summary)
+        if summary.completedCount > 0 {
+            await publishEnrichedWorkspaceIfConfigured()
+        }
+        IdeaForgeLog.workflow.info("iOS recording-local speech transcription completed; attempted: \(summary.attemptedCount, privacy: .public), completed: \(summary.completedCount, privacy: .public), failed: \(summary.failedCount, privacy: .public)")
+    }
+
+    private func refreshLocalEnrichmentAvailability() async {
+        let availabilityRevision = localEnrichmentStatusGate.beginAvailabilityCheck()
+        if localEnrichmentRuntimePolicy.usesMixedOutcomeFixture {
+            guard !isProcessingLocalSpeech,
+                  localEnrichmentStatusGate.canApplyAvailability(from: availabilityRevision) else { return }
+            localSpeechStatusMessage = LocalEnrichmentPresentation.outcomeMessage(
+                AIProcessingSummary(
+                    attemptedCount: 2,
+                    completedCount: 2,
+                    titleGeneratedCount: 1,
+                    titleUnavailableCount: 1,
+                    titleUnavailableReasons: [.appleIntelligenceNotEnabled: 1]
+                )
+            )
+            return
+        }
+        let candidates = store.localSpeechTranscriptionCandidates()
+        let titleAvailabilities: [IdeaTitleGenerationAvailability]
+        if localEnrichmentRuntimePolicy.usesUnavailableFoundationFixture {
+            titleAvailabilities = candidates.map { _ in .deviceNotEligible }
+        } else {
+            let generator = SystemFoundationTitleGenerator()
+            var resolved: [IdeaTitleGenerationAvailability] = []
+            for recording in candidates {
+                resolved.append(await generator.availability(for: recording.languageHint))
+            }
+            titleAvailabilities = resolved
+        }
+        guard !isProcessingLocalSpeech,
+              localEnrichmentStatusGate.canApplyAvailability(from: availabilityRevision) else { return }
+        localSpeechStatusMessage = LocalEnrichmentPresentation.preflightMessage(
+            availabilities: titleAvailabilities,
+            readyLocation: "this device"
+        )
+    }
+
+    private var localEnrichmentRuntimePolicy: LocalEnrichmentRuntimePolicy {
+        LocalEnrichmentRuntimePolicy(arguments: ProcessInfo.processInfo.arguments)
+    }
+
+    private func publishEnrichedWorkspaceIfConfigured() async {
+        do {
+            guard try backendConfigurationManager.resolvedAuthConfiguration() != nil else { return }
+        } catch {
+            IdeaForgeLog.sync.warning("Post-enrichment workspace publish skipped; backend configuration is invalid")
+            return
+        }
+
+        let publishResult = await ConfiguredWorkspaceAutoSyncProcessor(
+            backendConfigurationManager: backendConfigurationManager
+        )
+        .publishLocalSnapshotIfNeeded(from: store)
+        switch publishResult {
+        case .published(let summary):
+            IdeaForgeLog.sync.info("Post-enrichment workspace published: \(summary.pushedLocalSnapshot, privacy: .public)")
+        case .idle:
+            IdeaForgeLog.sync.info("Post-enrichment workspace publish not needed")
+        case .skipped(let blocker, _):
+            IdeaForgeLog.sync.warning("Post-enrichment workspace publish skipped; blocker: \(blocker.rawValue, privacy: .public)")
+        }
     }
 
     private func refreshedAccountUsageSummaryForBackendAI() async throws -> BackendAccountUsageSummary {
@@ -1358,9 +1661,9 @@ private struct MobileLiveStatusStrip: View {
 
     private var tint: Color {
         if isRecording { return .orange }
-        if isProcessingUploads { return .cyan }
-        if isSyncingWorkspace { return .indigo }
-        if isProcessingAI { return .purple }
+        if isProcessingUploads { return .forgeEmber }
+        if isSyncingWorkspace { return .forgeMagenta }
+        if isProcessingAI { return .forgeSpark }
         if isProcessingLocalSpeech { return .mint }
         if isAccountBusy { return .teal }
         return snapshot.liveHealthTone.mobileTint
@@ -1447,16 +1750,59 @@ struct RecordingInboxView: View {
     @Bindable var store: IdeaForgeStore
     var status: InboxStatusSnapshot?
     var rows: [RecordingRowSnapshot]
+    var snapshot: MobileDashboardSnapshot
+    var syncReadiness: MobileSyncReadinessSnapshot
+    var syncPlan: MobileWorkspaceSyncPlanSnapshot
+    var syncTrust: MobileSyncTrustSnapshot
     var isRecording: Bool
     var isProcessingUploads: Bool
+    var isSyncingWorkspace: Bool
+    var syncStatusMessage: String
     var onRecord: () -> Void
     var onStatusAction: (InboxStatusAction) -> Void
     var onRetryUpload: (String) -> Void
+    var onRefresh: () async -> Void
+    var onSync: () -> Void
+    var onConnectMac: () -> Void
     @State private var selectedRecordingID: String?
 
     var body: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 16) {
+                MobileDeviceSyncPanel(
+                    snapshot: snapshot,
+                    readiness: syncReadiness,
+                    syncPlan: syncPlan,
+                    syncTrust: syncTrust,
+                    syncHealth: store.syncHealth,
+                    backendStatusMessage: syncStatusMessage,
+                    isSyncingWorkspace: isSyncingWorkspace,
+                    isProcessingUploads: isProcessingUploads,
+                    isProcessingAI: false,
+                    primaryActionTitle: isSyncingWorkspace ? "Syncing" : "Sync Now",
+                    primaryActionSystemImage: "arrow.triangle.2.circlepath",
+                    primaryAccessibilityIdentifier: "ios.inbox.syncNow",
+                    primaryAccessibilityHint: isSyncingWorkspace ? "All-device sync is already running" : "Import and upload recordings, reconcile the Mac workspace, and update Watch titles",
+                    onPrimaryAction: onSync,
+                    wholePanelPrimaryAction: false,
+                    compactLayout: true,
+                    showsRoute: true,
+                    showsMetrics: false,
+                    secondaryActionTitle: "Connect to Mac",
+                    secondaryActionSystemImage: "desktopcomputer.and.arrow.down",
+                    secondaryAccessibilityIdentifier: "ios.inbox.connectMac",
+                    secondaryAccessibilityHint: "Pair this iPhone with the automatically discovered Mac backend",
+                    onSecondaryAction: onConnectMac,
+                    showsPrimaryAction: false,
+                    quietLayout: true
+                )
+
+                InboxCaptureButton(
+                    isRecording: isRecording,
+                    onRecord: onRecord
+                )
+                .accessibilityIdentifier("ios.inbox.captureAction")
+
                 if let status {
                     InboxStatusBanner(
                         snapshot: status,
@@ -1466,12 +1812,6 @@ struct RecordingInboxView: View {
                     .accessibilityIdentifier("ios.inbox.statusBanner")
                     .transition(.move(edge: .top).combined(with: .opacity))
                 }
-
-                InboxCaptureButton(
-                    isRecording: isRecording,
-                    onRecord: onRecord
-                )
-                .accessibilityIdentifier("ios.inbox.captureAction")
 
                 if rows.isEmpty {
                     ContentUnavailableView(
@@ -1508,6 +1848,10 @@ struct RecordingInboxView: View {
             .padding(.bottom, 24)
         }
         .accessibilityIdentifier("ios.inbox.scroll")
+        .accessibilityValue(isSyncingWorkspace ? "Syncing everything" : syncStatusMessage)
+        .refreshable {
+            await onRefresh()
+        }
         .navigationTitle("Recording Inbox")
         .navigationBarTitleDisplayMode(.inline)
         .animation(reduceMotion ? nil : .snappy(duration: 0.18), value: status)
@@ -1643,7 +1987,7 @@ private struct InboxStatusBanner: View {
     private var tint: Color {
         switch snapshot.kind {
         case .syncConflict, .failedUpload: .orange
-        case .queuedUpload: .cyan
+        case .queuedUpload: .forgeEmber
         case .offline: .secondary
         }
     }
@@ -1687,19 +2031,135 @@ private struct InboxStatusBanner: View {
 }
 
 private struct InboxCaptureButton: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     var isRecording: Bool
     var onRecord: () -> Void
 
     var body: some View {
         Button(action: onRecord) {
-            Label(isRecording ? "Stop" : "Record", systemImage: isRecording ? "stop.fill" : "mic.fill")
-                .font(.headline)
-                .frame(maxWidth: .infinity, minHeight: 44)
+            Group {
+                if dynamicTypeSize.isAccessibilitySize {
+                    VStack(alignment: .leading, spacing: 14) {
+                        HStack(alignment: .center, spacing: 12) {
+                            captureEyebrow
+                            Spacer(minLength: 8)
+                            actionGlyph
+                        }
+                        captureCopy
+                        relayIndicator
+                    }
+                } else {
+                    HStack(spacing: 16) {
+                        VStack(alignment: .leading, spacing: 7) {
+                            captureEyebrow
+                            captureCopy
+                            relayIndicator
+                        }
+
+                        Spacer(minLength: 4)
+                        actionGlyph
+                    }
+                }
+            }
+            .padding(18)
+            .frame(maxWidth: .infinity, minHeight: 132, alignment: .leading)
+            .background(
+                LinearGradient(
+                    colors: [
+                        Color.primary.opacity(0.075),
+                        (isRecording ? Color.red : Color.forgeEmber).opacity(0.10),
+                        Color.primary.opacity(0.025)
+                    ],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                ),
+                in: UnevenRoundedRectangle(
+                    topLeadingRadius: 28,
+                    bottomLeadingRadius: 12,
+                    bottomTrailingRadius: 28,
+                    topTrailingRadius: 12,
+                    style: .continuous
+                )
+            )
+            .overlay {
+                UnevenRoundedRectangle(
+                    topLeadingRadius: 28,
+                    bottomLeadingRadius: 12,
+                    bottomTrailingRadius: 28,
+                    topTrailingRadius: 12,
+                    style: .continuous
+                )
+                .strokeBorder((isRecording ? Color.red : Color.forgeEmber).opacity(0.24), lineWidth: 1)
+            }
         }
-        .buttonStyle(.borderedProminent)
-        .tint(isRecording ? .red : .cyan)
+        .buttonStyle(.plain)
         .accessibilityLabel(isRecording ? "Stop Recording" : "Record")
-        .accessibilityHint(isRecording ? "Stop recording and add the idea to the Inbox" : "Start recording a new idea")
+        .accessibilityValue(isRecording ? "Recording locally" : "Ready for local capture")
+        .accessibilityHint(isRecording ? "Stop recording and save the idea locally in the Inbox" : "Start recording a new idea locally on iPhone")
+    }
+
+    private var captureEyebrow: some View {
+        Text(isRecording ? "CAPTURE IN PROGRESS" : "CAPTURE RELAY")
+            .font(.system(size: 12, weight: .bold, design: .monospaced))
+            .tracking(1)
+            .foregroundStyle(isRecording ? .red : .forgeEmber)
+    }
+
+    private var captureCopy: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Text(isRecording ? "Recording on iPhone" : "Forge a voice idea")
+                .font(.title3.weight(.semibold))
+                .foregroundStyle(.primary)
+
+            Text(isRecording ? "Stop to save the audio locally." : "Saved locally first. Sync follows your configured path.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.leading)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var relayIndicator: some View {
+        HStack(spacing: 6) {
+            relayNode(symbol: "iphone", isActive: true)
+            relayLine(isActive: isRecording)
+            relayNode(symbol: "tray.full", isActive: isRecording)
+            Text(isRecording ? "LOCAL" : "READY")
+                .font(.system(size: 11, weight: .bold, design: .monospaced))
+                .foregroundStyle(isRecording ? .red : .secondary)
+        }
+        .accessibilityHidden(true)
+    }
+
+    private var actionGlyph: some View {
+        ZStack {
+            Circle()
+                .strokeBorder((isRecording ? Color.red : Color.forgeEmber).opacity(0.28), lineWidth: 1)
+                .frame(width: 72, height: 72)
+            Circle()
+                .fill((isRecording ? Color.red : Color.forgeEmber).gradient)
+                .frame(width: 58, height: 58)
+            Image(systemName: isRecording ? "stop.fill" : "mic.fill")
+                .font(.system(size: 22, weight: .bold))
+                .foregroundStyle(.black.opacity(0.82))
+        }
+        .scaleEffect(isRecording && !reduceMotion ? 1.04 : 1)
+        .animation(reduceMotion ? nil : .snappy(duration: 0.18), value: isRecording)
+    }
+
+    private func relayNode(symbol: String, isActive: Bool) -> some View {
+        Image(systemName: symbol)
+            .font(.caption2.weight(.bold))
+            .foregroundStyle(isActive ? .black : .secondary)
+            .frame(width: 22, height: 22)
+            .background(isActive ? (isRecording ? Color.red : Color.forgeEmber) : Color.secondary.opacity(0.12), in: Circle())
+    }
+
+    private func relayLine(isActive: Bool) -> some View {
+        Capsule()
+            .fill(isActive ? Color.red : Color.secondary.opacity(0.18))
+            .frame(width: 30, height: 2)
     }
 }
 
@@ -1745,6 +2205,56 @@ private struct RecordingInboxRow: View {
     }
 }
 
+private struct MacConnectionView: View {
+    @Environment(\.dismiss) private var dismiss
+    @Binding var pairingCode: String
+    var statusMessage: String
+    var isPairing: Bool
+    var onPair: () -> Void
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    Label("IdeaForge finds your Mac automatically on the local network.", systemImage: "bonjour")
+                        .font(.callout)
+                    Text("Enter the short code shown by the Mac app. No server address or API setup is needed.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+
+                Section("Pairing code") {
+                    SecureField("Five-minute code", text: $pairingCode)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .accessibilityIdentifier("ios.macConnection.pairingCode")
+
+                    Button(action: onPair) {
+                        Label(isPairing ? "Connecting" : "Connect", systemImage: "link.badge.plus")
+                            .frame(maxWidth: .infinity, minHeight: 44)
+                    }
+                    .disabled(isPairing || pairingCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .accessibilityIdentifier("ios.macConnection.pair")
+                }
+
+                Section("Status") {
+                    Text(statusMessage)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("ios.macConnection.status")
+                }
+            }
+            .navigationTitle("Connect to Mac")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Done", action: dismiss.callAsFunction)
+                }
+            }
+        }
+    }
+}
+
 private struct RecordingDetailView: View {
     @Environment(\.dismiss) private var dismiss
     @Bindable var store: IdeaForgeStore
@@ -1757,19 +2267,55 @@ private struct RecordingDetailView: View {
                 if let context {
                     let retainedAudio = store.retainedAudioValidation(recordingID: recordingID)
 
-                    Section("Recording") {
-                        LabeledContent("Project", value: context.row.title)
-                        LabeledContent("Source", value: context.recording.deviceName)
-                        LabeledContent("Recorded", value: context.row.createdAt.formatted(date: .abbreviated, time: .shortened))
-                        LabeledContent("Duration", value: "\(context.row.durationSeconds) seconds")
-                        LabeledContent("State", value: context.row.state.rawValue)
-                            .accessibilityElement(children: .ignore)
-                            .accessibilityIdentifier("ios.recordingDetail.state")
-                            .accessibilityLabel("State")
-                            .accessibilityValue(context.row.state.rawValue)
+                    Section {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text(displayTitle(for: context))
+                                .font(.title3.weight(.semibold))
+                                .accessibilityIdentifier("ios.recordingDetail.title")
+                            Label(syncStatus(for: context), systemImage: syncStatusSymbol(for: context))
+                                .font(.subheadline.weight(.medium))
+                                .foregroundStyle(syncStatusTint(for: context))
+                                .accessibilityElement(children: .ignore)
+                                .accessibilityLabel("Mac sync status")
+                                .accessibilityValue(syncStatus(for: context))
+                                .accessibilityIdentifier("ios.recordingDetail.syncStatus")
+                        }
+                        .padding(.vertical, 4)
                     }
 
-                    Section("Playback") {
+                    Section("Transcript") {
+                        if transcriptIsReady(for: context) {
+                            Text(context.project.transcript.cleanText)
+                                .font(.body)
+                                .textSelection(.enabled)
+                                .accessibilityIdentifier("ios.recordingDetail.transcript")
+                        } else {
+                            Label(transcriptPendingMessage(for: context), systemImage: "text.bubble")
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                                .accessibilityIdentifier("ios.recordingDetail.transcriptPending")
+                        }
+                    }
+
+                    Section("Details") {
+                        LabeledContent("Recorded", value: context.row.createdAt.formatted(date: .abbreviated, time: .shortened))
+                            .accessibilityElement(children: .ignore)
+                            .accessibilityLabel("Recorded")
+                            .accessibilityValue(context.row.createdAt.formatted(date: .abbreviated, time: .shortened))
+                            .accessibilityIdentifier("ios.recordingDetail.recordedAt")
+                        LabeledContent("Duration", value: "\(context.row.durationSeconds) seconds")
+                            .accessibilityElement(children: .ignore)
+                            .accessibilityLabel("Duration")
+                            .accessibilityValue("\(context.row.durationSeconds) seconds")
+                            .accessibilityIdentifier("ios.recordingDetail.duration")
+                        LabeledContent("Source", value: context.recording.deviceName)
+                            .accessibilityElement(children: .ignore)
+                            .accessibilityLabel("Source")
+                            .accessibilityValue(context.recording.deviceName)
+                            .accessibilityIdentifier("ios.recordingDetail.source")
+                    }
+
+                    Section("Audio") {
                         if retainedAudio == .available,
                            let localAudioPath = context.recording.localAudioPath {
                             RecordingPlaybackButton(localAudioPath: localAudioPath) {
@@ -1781,32 +2327,20 @@ private struct RecordingDetailView: View {
                         }
                     }
 
-                    if let uploadJob = context.uploadJob {
-                        Section("Upload") {
-                            LabeledContent("Status", value: uploadJob.status.label)
-                                .accessibilityElement(children: .ignore)
-                                .accessibilityIdentifier("ios.recordingDetail.uploadStatus")
-                                .accessibilityLabel("Upload status")
-                                .accessibilityValue(uploadJob.status.label)
-                            LabeledContent("Retained audio", value: retainedAudio.label)
-                                .accessibilityIdentifier("ios.recordingDetail.retainedAudio")
-                            if uploadJob.status == .permanentlyFailed {
-                                let category = uploadJob.failureCategory ?? .uploadError
-                                LabeledContent("Reason", value: category.label)
-                                    .accessibilityElement(children: .ignore)
-                                    .accessibilityIdentifier("ios.recordingDetail.failureCategory")
-                                    .accessibilityLabel("Failure category")
-                                    .accessibilityValue(category.label)
-                            }
-                            if uploadJob.status == .permanentlyFailed && retainedAudio.isRetryEligible {
+                    if context.uploadJob?.status == .permanentlyFailed {
+                        Section("Needs Attention") {
+                            Text("This recording could not reach the Mac. The audio remains saved on this iPhone.")
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                            if retainedAudio.isRetryEligible {
                                 Button {
                                     onRetryUpload(recordingID)
                                 } label: {
-                                    Label("Retry upload", systemImage: "arrow.clockwise")
+                                    Label("Try Again", systemImage: "arrow.clockwise")
                                         .frame(minHeight: 44)
                                 }
                                 .accessibilityIdentifier("ios.recordingDetail.retryUpload")
-                                .accessibilityHint("Queues the retained recording without replacing its audio")
+                                .accessibilityHint("Retry syncing the retained recording with the Mac")
                             }
                         }
                     }
@@ -1838,6 +2372,7 @@ private struct RecordingDetailView: View {
                     uploadJob: uploadJob,
                     hasRemoteReceipt: recording.audioObjectKey?.isEmpty == false
                 ),
+                project: project,
                 recording: recording,
                 uploadJob: uploadJob
             )
@@ -1845,8 +2380,58 @@ private struct RecordingDetailView: View {
         return nil
     }
 
+    private func displayTitle(for context: RecordingDetailContext) -> String {
+        let title = context.project.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        return title.isEmpty ? "Preparing title" : title
+    }
+
+    private func syncStatus(for context: RecordingDetailContext) -> String {
+        switch context.row.state {
+        case .synced:
+            "Synced with Mac"
+        case .transcribed:
+            "Transcript ready · waiting for Mac"
+        case .awaitingTranscript:
+            "Processing transcript"
+        case .failed:
+            "Needs attention"
+        case .uploading, .retryScheduled, .readyToUpload, .onIPhone, .onWatch:
+            "Waiting for Mac"
+        }
+    }
+
+    private func syncStatusSymbol(for context: RecordingDetailContext) -> String {
+        switch context.row.state {
+        case .synced: "checkmark.icloud"
+        case .transcribed: "text.document"
+        case .awaitingTranscript: "waveform.badge.magnifyingglass"
+        case .failed: "exclamationmark.triangle"
+        case .uploading, .retryScheduled, .readyToUpload, .onIPhone, .onWatch: "arrow.triangle.2.circlepath"
+        }
+    }
+
+    private func syncStatusTint(for context: RecordingDetailContext) -> Color {
+        switch context.row.state {
+        case .synced: .mint
+        case .failed: .orange
+        case .transcribed, .awaitingTranscript, .uploading, .retryScheduled, .readyToUpload, .onIPhone, .onWatch: .secondary
+        }
+    }
+
+    private func transcriptIsReady(for context: RecordingDetailContext) -> Bool {
+        (context.row.state == .synced || context.row.state == .transcribed)
+            && !context.project.transcript.cleanText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private func transcriptPendingMessage(for context: RecordingDetailContext) -> String {
+        context.row.state == .failed
+            ? "Transcript unavailable until sync recovers."
+            : "The transcript will appear here after Mac processing."
+    }
+
     private struct RecordingDetailContext {
         var row: RecordingRowSnapshot
+        var project: IdeaProject
         var recording: Recording
         var uploadJob: UploadJob?
     }
@@ -1918,6 +2503,7 @@ private extension RecordingRowState {
         case .onWatch: "applewatch"
         case .onIPhone: "iphone"
         case .readyToUpload: "icloud.and.arrow.up"
+        case .awaitingTranscript: "waveform.badge.magnifyingglass"
         case .uploading: "arrow.up.circle"
         case .retryScheduled: "clock.arrow.circlepath"
         case .failed: "exclamationmark.triangle"
@@ -1930,7 +2516,7 @@ private extension RecordingRowState {
         switch self {
         case .failed: .red
         case .retryScheduled: .orange
-        case .uploading, .readyToUpload: .cyan
+        case .uploading, .readyToUpload, .awaitingTranscript: .forgeEmber
         case .synced, .transcribed: .mint
         case .onWatch, .onIPhone: .secondary
         }
@@ -2356,15 +2942,17 @@ private struct MobileDeviceSyncPanel: View {
     var secondaryAccessibilityIdentifier: String
     var secondaryAccessibilityHint: String
     var onSecondaryAction: (() -> Void)?
+    var showsPrimaryAction = true
     var hidesNextStepInCompactLayout = false
     var usesAccessibilitySummaryLayout = false
+    var quietLayout = false
 
     private var tint: Color {
         if syncHealth.syncConflictStatus != nil { return .red }
         if snapshot.failedUploadCount > 0 { return .orange }
-        if isSyncingWorkspace || isProcessingUploads || isProcessingAI || snapshot.queuedUploadCount > 0 { return .cyan }
-        if syncHealth.watchReachable { return .teal }
-        return .secondary
+        if isSyncingWorkspace || isProcessingUploads || isProcessingAI || snapshot.queuedUploadCount > 0 { return .forgeEmber }
+        if syncHealth.watchReachable { return .forgeAubergine }
+        return .forgeAubergine
     }
 
     private var isLive: Bool {
@@ -2385,7 +2973,7 @@ private struct MobileDeviceSyncPanel: View {
         if snapshot.failedUploadCount > 1 { return "\(snapshot.failedUploadCount) uploads need review" }
         if snapshot.queuedUploadCount == 1 { return "1 recording waiting" }
         if snapshot.queuedUploadCount > 1 { return "\(snapshot.queuedUploadCount) recordings waiting" }
-        return "Device sync ready"
+        return quietLayout ? "Up to date" : "Device sync ready"
     }
 
     private var detail: String {
@@ -2484,14 +3072,19 @@ private struct MobileDeviceSyncPanel: View {
                     Spacer(minLength: 8)
                 }
 
-                if showsRoute && !showsCompactConflictReview {
+                if quietLayout {
+                    MobileQuietSyncRoute(
+                        watchReachable: syncHealth.watchReachable,
+                        macAvailable: readiness.macStatus != "Blocked"
+                    )
+                } else if showsRoute && !showsCompactConflictReview {
                     MobileSyncHandoffSummaryStrip(
                         steps: readiness.timelineSteps,
                         isActive: active
                     )
                 }
 
-                if showsRoute {
+                if showsRoute && !quietLayout {
                     MobileSyncTrustStrip(
                         trust: syncTrust,
                         isActive: active || syncTrust.isLive
@@ -2499,34 +3092,44 @@ private struct MobileDeviceSyncPanel: View {
                 }
 
                 HStack(spacing: 10) {
-                    Button(action: onPrimaryAction) {
-                        Label(compactPrimaryActionTitle, systemImage: primaryActionSystemImage)
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.white)
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.70)
-                            .padding(.horizontal, 10)
-                            .frame(maxWidth: .infinity, minHeight: 36)
-                            .background(tint.gradient, in: Capsule())
+                    if showsPrimaryAction {
+                        Button(action: onPrimaryAction) {
+                            Label(compactPrimaryActionTitle, systemImage: primaryActionSystemImage)
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.white)
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.70)
+                                .padding(.horizontal, 10)
+                                .frame(maxWidth: .infinity, minHeight: 44)
+                                .background(tint.gradient, in: Capsule())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(primaryActionTitle)
+                        .accessibilityIdentifier(primaryAccessibilityIdentifier)
+                        .accessibilityHint(primaryAccessibilityHint)
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel(primaryActionTitle)
-                    .accessibilityIdentifier(primaryAccessibilityIdentifier)
-                    .accessibilityHint(primaryAccessibilityHint)
 
                     if let secondaryActionTitle, onSecondaryAction != nil {
                         Button(action: onSecondaryAction ?? {}) {
-                            Image(systemName: secondaryActionSystemImage)
-                                .font(.headline.weight(.semibold))
-                                .foregroundStyle(tint)
-                                .frame(width: 38, height: 38)
-                                .background(.thinMaterial, in: Circle())
-                                .overlay {
-                                    Circle().strokeBorder(tint.opacity(0.20))
+                            if showsPrimaryAction {
+                                Image(systemName: secondaryActionSystemImage)
+                                    .font(.headline.weight(.semibold))
+                                    .foregroundStyle(tint)
+                                    .frame(width: 44, height: 44)
+                                    .background(.thinMaterial, in: Circle())
+                                    .overlay {
+                                        Circle().strokeBorder(tint.opacity(0.20))
+                                    }
+                            } else {
+                                Label(secondaryActionTitle, systemImage: secondaryActionSystemImage)
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(tint)
+                                    .frame(maxWidth: .infinity, minHeight: 44)
+                                    .background(tint.opacity(0.10), in: Capsule())
                             }
                         }
                         .buttonStyle(.plain)
-                        .frame(width: 42, height: 42)
+                        .frame(maxWidth: showsPrimaryAction ? 44 : .infinity, minHeight: 44)
                         .accessibilityLabel(secondaryActionTitle)
                         .accessibilityIdentifier(secondaryAccessibilityIdentifier)
                         .accessibilityHint(secondaryAccessibilityHint)
@@ -2535,7 +3138,7 @@ private struct MobileDeviceSyncPanel: View {
                     Spacer(minLength: 0)
                 }
 
-                if showsRoute && !showsCompactConflictReview {
+                if showsRoute && !quietLayout && !showsCompactConflictReview {
                     MobileDeviceRouteTimeline(
                         readiness: readiness,
                         syncHealth: syncHealth,
@@ -2547,7 +3150,7 @@ private struct MobileDeviceSyncPanel: View {
                     )
                 }
 
-                if !usesAccessibilityInboxLayout && !hidesNextStepInCompactLayout {
+                if !quietLayout && !usesAccessibilityInboxLayout && !hidesNextStepInCompactLayout {
                     MobileSyncNextStepStrip(
                         readiness: readiness,
                         tint: tint,
@@ -2555,7 +3158,7 @@ private struct MobileDeviceSyncPanel: View {
                     )
                 }
 
-                if !isCompactInboxPanel {
+                if !quietLayout && !isCompactInboxPanel {
                     MobileWorkspaceAutoSyncStrip(
                         plan: syncPlan,
                         tint: syncPlan.tone.mobileTint,
@@ -2573,7 +3176,7 @@ private struct MobileDeviceSyncPanel: View {
                     }
                 }
 
-                if showsReadinessStrip {
+                if !quietLayout && showsReadinessStrip {
                     MobileSyncReadinessStrip(
                         readiness: readiness,
                         showsHeader: !compactLayout || readiness.hasSyncConflict
@@ -2593,7 +3196,7 @@ private struct MobileDeviceSyncPanel: View {
                             title: "Queue",
                             value: "\(snapshot.queuedUploadCount)",
                             systemImage: "tray.and.arrow.up",
-                            tint: .cyan,
+                            tint: .forgeEmber,
                             isActive: active && snapshot.queuedUploadCount > 0
                         )
                         MobileSyncMetricTile(
@@ -2607,7 +3210,7 @@ private struct MobileDeviceSyncPanel: View {
                             title: "Last sync",
                             value: syncHealth.lastSuccessfulSync.formatted(date: .abbreviated, time: .shortened),
                             systemImage: "clock.arrow.circlepath",
-                            tint: .indigo,
+                            tint: .forgeMagenta,
                             isActive: active && isSyncingWorkspace
                         )
                         MobileSyncMetricTile(
@@ -2622,6 +3225,8 @@ private struct MobileDeviceSyncPanel: View {
             }
         }
         .accessibilityElement(children: .contain)
+        .accessibilityLabel("Device sync")
+        .accessibilityValue("\(title). \(detail)")
         .accessibilityIdentifier("ios.syncOverview")
         .contentShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
         .onTapGesture {
@@ -2664,6 +3269,48 @@ private struct MobileDeviceSyncPanel: View {
         case .blocked: .orange
         case .failed: .red
         }
+    }
+}
+
+private struct MobileQuietSyncRoute: View {
+    var watchReachable: Bool
+    var macAvailable: Bool
+
+    var body: some View {
+        HStack(spacing: 8) {
+            routeNode(
+                "Watch",
+                systemImage: watchReachable ? "applewatch.radiowaves.left.and.right" : "applewatch",
+                tint: watchReachable ? .forgeEmber : .secondary
+            )
+            Image(systemName: "chevron.right")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.tertiary)
+                .accessibilityHidden(true)
+            routeNode("iPhone", systemImage: "iphone", tint: .forgeCoral)
+            Image(systemName: "chevron.right")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.tertiary)
+                .accessibilityHidden(true)
+            routeNode(
+                "Mac",
+                systemImage: "desktopcomputer",
+                tint: macAvailable ? .forgeMagenta : .secondary
+            )
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Sync route")
+        .accessibilityValue("Watch to iPhone to Mac")
+        .accessibilityIdentifier("ios.syncRouteSummary")
+    }
+
+    private func routeNode(_ title: String, systemImage: String, tint: Color) -> some View {
+        Label(title, systemImage: systemImage)
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(tint)
+            .lineLimit(1)
+            .frame(maxWidth: .infinity)
     }
 }
 
@@ -3742,11 +4389,11 @@ struct ProjectDetailView: View {
     }
 
     private var ambientTint: Color {
-        guard let project else { return .indigo }
+        guard let project else { return .forgeAubergine }
         switch project.source {
-        case .watch: return Color.cyan
-        case .iphone: return Color.orange
-        case .mac: return Color.indigo
+        case .watch: return Color.forgeEmber
+        case .iphone: return Color.forgeCoral
+        case .mac: return Color.forgeMagenta
         case .importFile: return Color.mint
         }
     }
@@ -3943,7 +4590,7 @@ struct MobileTranscriptReviewPanel: View {
     }
 
     var body: some View {
-        LiquidGlassPanel(tint: .cyan.opacity(0.12), interactive: false) {
+        LiquidGlassPanel(tint: .forgeEmber.opacity(0.12), interactive: false) {
             VStack(alignment: .leading, spacing: 12) {
                 HStack {
                     Label("Transcript Review", systemImage: "text.quote")
@@ -3992,7 +4639,7 @@ struct MobileTranscriptReviewPanel: View {
                     .scrollContentBackground(.hidden)
                     .frame(minHeight: 130)
                     .padding(8)
-                    .mobileInputSurface(tint: .cyan, cornerRadius: 16)
+                    .mobileInputSurface(tint: .forgeEmber, cornerRadius: 16)
                     .accessibilityIdentifier("ios.project.transcript.editor")
             }
         }
@@ -4048,7 +4695,7 @@ private struct MobileTranscriptSegmentReviewRow: View {
                 .scrollContentBackground(.hidden)
                 .frame(minHeight: 86)
                 .padding(8)
-                .mobileInputSurface(tint: isMarkedImportant ? .orange : .cyan, cornerRadius: 14)
+                .mobileInputSurface(tint: isMarkedImportant ? .forgeCoral : .forgeEmber, cornerRadius: 14)
                 .accessibilityIdentifier("ios.project.transcript.segmentEditor.\(segment.id)")
 
             HStack {
@@ -4278,9 +4925,11 @@ private struct MobileQuestionAnswerCard: View {
 struct RecordingQueueRow: View {
     var recording: Recording
     var projectTitle: String
+    var onKeepWithoutTranscript: (() -> Void)? = nil
+    @State private var isConfirmingKeepWithoutTranscript = false
 
     var body: some View {
-        let tint = recording.syncStatus == .failed ? Color.orange : Color.cyan
+        let tint = recording.syncStatus == .failed ? Color.orange : Color.forgeEmber
 
         LiquidGlassPanel(
             tint: tint.opacity(recording.syncStatus == .failed ? 0.12 : 0.10),
@@ -4307,6 +4956,17 @@ struct RecordingQueueRow: View {
                             .fixedSize(horizontal: false, vertical: true)
                             .accessibilityIdentifier("ios.recordingQueue.failureDiagnostic.\(recording.id)")
                     }
+                    if canKeepWithoutTranscript, onKeepWithoutTranscript != nil {
+                        Button {
+                            isConfirmingKeepWithoutTranscript = true
+                        } label: {
+                            Label("Keep Audio Without Transcript", systemImage: "waveform.badge.checkmark")
+                                .frame(minHeight: 44)
+                        }
+                        .buttonStyle(.bordered)
+                        .accessibilityIdentifier("ios.account.keepWithoutTranscript.\(recording.id)")
+                        .accessibilityHint("Keeps the recording audio and removes only its placeholder transcript text")
+                    }
                 }
                 Spacer()
             }
@@ -4315,6 +4975,27 @@ struct RecordingQueueRow: View {
                 .padding(.top, 6)
         }
         .accessibilityElement(children: .contain)
+        .confirmationDialog(
+            "Keep audio without a transcript?",
+            isPresented: $isConfirmingKeepWithoutTranscript,
+            titleVisibility: .visible
+        ) {
+            Button("Keep Audio") {
+                onKeepWithoutTranscript?()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("The uploaded recording stays available. Only its placeholder transcript text is removed, and sync can continue.")
+        }
+    }
+
+    private var canKeepWithoutTranscript: Bool {
+        guard recording.syncStatus == .failed,
+              recording.processingDiagnostic?.isRetryable == false else {
+            return false
+        }
+        return (recording.localFileStatus == .uploaded && recording.audioObjectKey?.isEmpty == false)
+            || (recording.localFileStatus == .available && recording.localAudioPath?.isEmpty == false)
     }
 
     private func recordingDiagnosticText(_ diagnostic: RecordingProcessingDiagnostic) -> String {
@@ -4409,11 +5090,11 @@ extension WorkspaceLiveHealthTone {
     var mobileTint: Color {
         switch self {
         case .ready: .mint
-        case .active: .cyan
+        case .active: .forgeEmber
         case .needsReview: .orange
         case .syncConflict: .red
         case .offline: .secondary
-        case .localFirst: .indigo
+        case .localFirst: .forgeAubergine
         }
     }
 }
@@ -4428,7 +5109,7 @@ struct MobileAmbientBackdrop: View {
                 colors: [
                     Color(uiColor: .systemBackground),
                     tint.opacity(isActive ? 0.12 : 0.07),
-                    Color.indigo.opacity(isActive ? 0.08 : 0.04),
+                    Color.forgeAubergine.opacity(isActive ? 0.18 : 0.10),
                     Color(uiColor: .secondarySystemBackground)
                 ],
                 startPoint: .topLeading,
@@ -4762,9 +5443,9 @@ struct MobileLiveIconBadge: View {
 extension IdeaProject {
     var mobileTint: Color {
         switch source {
-        case .watch: .cyan
-        case .iphone: .orange
-        case .mac: .indigo
+        case .watch: .forgeEmber
+        case .iphone: .forgeCoral
+        case .mac: .forgeMagenta
         case .importFile: .mint
         }
     }
@@ -4899,6 +5580,7 @@ struct AccountHubView: View {
     var syncTrust: MobileSyncTrustSnapshot
     @Binding var backendSettings: BackendConnectionSettings
     @Binding var backendTokenEntry: String
+    @Binding var localBackendPairingCode: String
     var backendStatusMessage: String
     var localSpeechStatusMessage: String
     var authenticatedSession: BackendAuthenticatedSession?
@@ -4914,12 +5596,14 @@ struct AccountHubView: View {
     var isProcessingAI: Bool
     var isProcessingLocalSpeech: Bool
     var isValidatingAuthSession: Bool
+    var isPairingLocalBackend: Bool
     var isRefreshingAccountUsage: Bool
     var isLoadingCommerce: Bool
     var isPurchasingCommerce: Bool
     var isRestoringCommerce: Bool
     var isRegisteringPushNotifications: Bool
     var onSaveBackend: () -> Void
+    var onPairLocalBackend: () -> Void
     var onClearBackendCredentials: () -> Void
     var onSyncWorkspace: () -> Void
     var onRefreshWorkspace: () -> Void
@@ -4936,6 +5620,7 @@ struct AccountHubView: View {
     var onRegisterPushNotifications: () -> Void
     var onProcessUploads: () -> Void
     var onRetryUpload: (String) -> Void
+    var onKeepWithoutTranscript: (String) -> Void
     @State private var selectedSyncConflictReviewItemIDs = Set<String>()
     @State private var syncConflictCustomMergeValuesByItemID = [String: String]()
     @State private var syncConflictItemPrimaryValuesByItemID = [String: String]()
@@ -4953,237 +5638,8 @@ struct AccountHubView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 16) {
-            MobileAccountStatusHero(
-                snapshot: snapshot,
-                status: accountCommandStatus,
-                isActive: accountSurfaceIsActive,
-                isRemoteEnabled: backendSettings.isEnabled,
-                privacyMode: store.privacyMode
-            )
-            .dynamicTypeSize(.medium ... .xLarge)
-
-            MobileAccountSection("Live Workspace") {
-                MobileDeviceSyncPanel(
-                    snapshot: snapshot,
-                    readiness: syncReadiness,
-                    syncPlan: syncPlan,
-                    syncTrust: syncTrust,
-                    syncHealth: store.syncHealth,
-                    backendStatusMessage: backendStatusMessage,
-                    isSyncingWorkspace: isSyncingWorkspace,
-                    isProcessingUploads: false,
-                    isProcessingAI: isProcessingAI || isProcessingLocalSpeech,
-                    primaryActionTitle: isSyncingWorkspace ? "Publishing" : "Publish Workspace",
-                    primaryActionSystemImage: "arrow.triangle.2.circlepath",
-                    primaryAccessibilityIdentifier: "ios.account.syncOverview.syncWorkspace",
-                    primaryAccessibilityHint: isSyncingWorkspace ? "Workspace sync is already running" : "Publish the local workspace snapshot to the configured backend",
-                    onPrimaryAction: onSyncWorkspace,
-                    wholePanelPrimaryAction: false,
-                    compactLayout: true,
-                    showsRoute: true,
-                    showsMetrics: false,
-                    secondaryActionTitle: isSyncingWorkspace ? "Refreshing" : "Refresh from Backend",
-                    secondaryActionSystemImage: "arrow.down.circle",
-                    secondaryAccessibilityIdentifier: "ios.account.syncOverview.secondary",
-                    secondaryAccessibilityHint: isSyncingWorkspace ? "Workspace sync is already running" : "Pull the latest backend workspace snapshot onto this iPhone",
-                    onSecondaryAction: onRefreshWorkspace
-                )
-                MobileSyncHandoffStatusStrip(
-                    plan: syncPlan,
-                    tint: syncPlan.tone.mobileTint,
-                    isActive: isSyncingWorkspace
-                )
-                LiveHealthFormRow(snapshot: snapshot)
-            }
-            MobileAccountSection("Actions") {
-                let billingReadiness = commerceReadiness
-                let purchaseProductID = preferredPurchaseProductID
-                AccountCommandDeck(
-                    isActive: isSyncingWorkspace || isProcessingAI || isProcessingLocalSpeech || isValidatingAuthSession || isRefreshingAccountUsage || isPurchasingCommerce || isRestoringCommerce || isRegisteringPushNotifications,
-                    primaryStatus: accountCommandStatus,
-                    commands: [
-                        AccountCommand(
-                            title: purchaseActionTitle,
-                            detail: preferredPurchaseProductID == nil ? "Store unavailable" : billingReadiness.planLabel,
-                            systemImage: purchaseActionSystemImage,
-                            tint: .mint,
-                            isDisabled: purchaseProductID == nil || !billingReadiness.canPurchase || isPurchasingCommerce,
-                            accessibilityIdentifier: "ios.account.purchasePro",
-                            accessibilityHint: purchaseActionHint(readiness: billingReadiness),
-                            action: {
-                                if let purchaseProductID {
-                                    onPurchaseProduct(purchaseProductID)
-                                }
-                            }
-                        ),
-                        AccountCommand(
-                            title: isRestoringCommerce ? "Restoring" : "Restore Purchases",
-                            detail: billingReadiness.blockerSummary(for: billingReadiness.restoreBlockers),
-                            systemImage: "arrow.clockwise.circle",
-                            tint: .cyan,
-                            isDisabled: !billingReadiness.canRestore || isRestoringCommerce,
-                            accessibilityIdentifier: "ios.account.restorePurchases",
-                            accessibilityHint: billingReadiness.blockerSummary(for: billingReadiness.restoreBlockers),
-                            action: onRestorePurchases
-                        ),
-                        AccountCommand(
-                            title: isRefreshingAccountUsage ? "Refreshing Usage" : "Refresh Usage",
-                            detail: accountStatusMessage,
-                            systemImage: "chart.bar.doc.horizontal",
-                            tint: .teal,
-                            isDisabled: isRefreshingAccountUsage,
-                            accessibilityIdentifier: "ios.account.refreshUsage",
-                            accessibilityHint: isRefreshingAccountUsage ? "Backend account usage refresh is already running" : "Fetch the account plan and workspace usage summary from the configured backend",
-                            action: onRefreshAccountUsage
-                        ),
-                        AccountCommand(
-                            title: isValidatingAuthSession ? "Validating Session" : "Validate Session",
-                            detail: authStatusMessage,
-                            systemImage: "person.badge.key",
-                            tint: .orange,
-                            isDisabled: isValidatingAuthSession,
-                            accessibilityIdentifier: "ios.account.validateSession",
-                            accessibilityHint: isValidatingAuthSession ? "Backend session validation is already running" : "Validate the saved bearer token and workspace against the backend",
-                            action: onValidateSession
-                        ),
-                        AccountCommand(
-                            title: isProcessingLocalSpeech ? "Transcribing Local" : "Local Speech",
-                            detail: localSpeechStatusMessage,
-                            systemImage: "waveform",
-                            tint: .mint,
-                            isDisabled: isProcessingLocalSpeech,
-                            accessibilityIdentifier: "ios.account.processLocalSpeech",
-                            accessibilityHint: isProcessingLocalSpeech ? "Local speech transcription is already running" : "Transcribe locally available iPhone and Watch recordings on this device",
-                            action: onProcessLocalSpeech
-                        ),
-                        AccountCommand(
-                            title: isRegisteringPushNotifications ? "Registering Push" : "Register Push",
-                            detail: pushNotificationStatusMessage,
-                            systemImage: "bell.badge",
-                            tint: .purple,
-                            isDisabled: isRegisteringPushNotifications,
-                            accessibilityIdentifier: "ios.account.registerPush",
-                            accessibilityHint: isRegisteringPushNotifications ? "Push sync registration is already running" : "Register this iPhone for backend push sync notifications",
-                            action: onRegisterPushNotifications
-                        )
-                    ]
-                )
-                AccountReadinessSummaryRow(
-                    title: "Manage Subscription",
-                    detail: billingReadiness.blockerSummary(for: billingReadiness.manageSubscriptionBlockers),
-                    systemImage: "creditcard",
-                    tint: .blue,
-                    accessibilityIdentifier: "ios.account.manageSubscription.detail"
-                )
-                AccountReadinessSummaryRow(
-                    title: "Delete Account",
-                    detail: billingReadiness.blockerSummary(for: billingReadiness.accountDeletionBlockers),
-                    systemImage: "person.crop.circle.badge.xmark",
-                    tint: .red,
-                    accessibilityIdentifier: "ios.account.deleteAccount.detail"
-                )
-            }
-            MobileAccountSection("Privacy") {
-                Picker("Mode", selection: privacyModeBinding) {
-                    ForEach(PrivacyMode.allCases) { mode in
-                        Text(mode.label).tag(mode)
-                    }
-                }
-                Text(store.privacyMode.description)
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            }
-            MobileAccountSection("Subscription") {
-                let billingReadiness = commerceReadiness
-                if let authenticatedSession {
-                    LabeledContent("Session workspace", value: authenticatedSession.workspaceID)
-                    LabeledContent("Session account", value: "\(authenticatedSession.account.planName) (\(authenticatedSession.account.planStatus.label))")
-                    Text("Capabilities: \(authenticatedSession.capabilities.map(\.label).joined(separator: ", "))")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                } else {
-                    LabeledContent("Backend session", value: "Not validated")
-                }
-                Text(authStatusMessage)
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                if let accountUsageSummary {
-                    LabeledContent("Current plan", value: "\(accountUsageSummary.account.planName) (\(accountUsageSummary.account.planStatus.label))")
-                    ForEach(accountUsageSummary.entitlements) { entitlement in
-                        LabeledContent(
-                            entitlement.displayName,
-                            value: "\(entitlement.usedLabel) / \(entitlement.includedLabel)"
-                        )
-                    }
-                } else {
-                    LabeledContent("Current plan", value: "Not loaded")
-                }
-                Text(accountStatusMessage)
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                LabeledContent("Billing status", value: billingReadiness.planLabel)
-                Text(commerceStatusMessage)
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                if storeKitProducts.isEmpty {
-                    CommerceActionReadinessRow(
-                        title: isLoadingCommerce ? "Loading Products" : "Purchase Pro",
-                        systemImage: "cart.badge.plus",
-                        isEnabled: false,
-                        blockerSummary: billingReadiness.blockerSummary(for: billingReadiness.purchaseBlockers),
-                        accessibilityIdentifier: "ios.account.purchasePro.detail"
-                    )
-                } else {
-                    ForEach(storeKitProducts) { product in
-                        CommerceProductPurchaseRow(
-                            product: product,
-                            isActive: activeCommerceProductIDs.contains(product.id),
-                            isEnabled: billingReadiness.canPurchase && !isPurchasingCommerce,
-                            blockerSummary: billingReadiness.blockerSummary(for: billingReadiness.purchaseBlockers),
-                            accessibilityIdentifier: "ios.account.purchase.\(product.id).detail",
-                            action: {
-                                onPurchaseProduct(product.id)
-                            }
-                        )
-                    }
-                }
-                CommerceActionReadinessRow(
-                    title: "Restore Purchases",
-                    systemImage: "arrow.clockwise.circle",
-                    isEnabled: billingReadiness.canRestore && !isRestoringCommerce,
-                    blockerSummary: billingReadiness.blockerSummary(for: billingReadiness.restoreBlockers),
-                    accessibilityIdentifier: "ios.account.restorePurchases.detail",
-                    action: onRestorePurchases
-                )
-                CommerceActionReadinessRow(
-                    title: "Manage Subscription",
-                    systemImage: "creditcard",
-                    isEnabled: billingReadiness.canManageSubscription,
-                    blockerSummary: billingReadiness.blockerSummary(for: billingReadiness.manageSubscriptionBlockers),
-                    accessibilityIdentifier: "ios.account.manageSubscription.row",
-                    action: onManageSubscription
-                )
-                CommerceActionReadinessRow(
-                    title: "Delete Account",
-                    systemImage: "person.crop.circle.badge.xmark",
-                    isEnabled: billingReadiness.canRequestAccountDeletion,
-                    blockerSummary: billingReadiness.blockerSummary(for: billingReadiness.accountDeletionBlockers),
-                    accessibilityIdentifier: "ios.account.deleteAccount.row",
-                    role: .destructive,
-                    action: onRequestAccountDeletion
-                )
-                Button(action: onRefreshCommerce) {
-                    Label(isLoadingCommerce ? "Loading StoreKit" : "Reload StoreKit", systemImage: "bag.badge.plus")
-                }
-                .accessibilityIdentifier("ios.account.reloadStoreKit")
-                .disabled(isLoadingCommerce)
-                Button(action: onRefreshAccountUsage) {
-                    Label(isRefreshingAccountUsage ? "Refreshing" : "Refresh Usage", systemImage: "chart.bar.doc.horizontal")
-                }
-                .accessibilityIdentifier("ios.account.refreshUsage.detail")
-                .disabled(isRefreshingAccountUsage)
-            }
-            MobileAccountSection("Upload Diagnostics") {
+            if !uploadDiagnostics.uploadContexts.isEmpty || !uploadDiagnostics.recordingContexts.isEmpty {
+                MobileAccountSection("Needs Attention") {
                 if uploadDiagnostics.uploadContexts.isEmpty && uploadDiagnostics.recordingContexts.isEmpty {
                     Text("No upload or recording diagnostics need review.")
                         .font(.footnote)
@@ -5202,7 +5658,10 @@ struct AccountHubView: View {
                     ForEach(uploadDiagnostics.recordingContexts) { context in
                         RecordingQueueRow(
                             recording: context.recording,
-                            projectTitle: context.projectTitle
+                            projectTitle: context.projectTitle,
+                            onKeepWithoutTranscript: {
+                                onKeepWithoutTranscript(context.recording.id)
+                            }
                         )
                         .accessibilityIdentifier("ios.account.recordingDiagnostic.\(context.id)")
                     }
@@ -5217,11 +5676,12 @@ struct AccountHubView: View {
                     .accessibilityIdentifier("ios.account.processUploads")
                     .accessibilityHint(isProcessingUploads ? "Upload processing is already running" : "Process recordings currently due for upload")
                 }
+                }
+                .id(AccountDestination.failedUploads)
             }
-            .id(AccountDestination.failedUploads)
 
-            MobileAccountSection("Backend Upload") {
-                if let conflict = store.syncHealth.syncConflictStatus {
+            if let conflict = store.syncHealth.syncConflictStatus {
+                MobileAccountSection("Needs Attention") {
                     MobileSyncConflictReviewPanel(
                         conflict: conflict,
                         selectedReviewItemIDs: $selectedSyncConflictReviewItemIDs,
@@ -5233,106 +5693,7 @@ struct AccountHubView: View {
                         itemNumericValuesByItemID: $syncConflictItemNumericValuesByItemID
                     )
                 }
-                HStack(alignment: .center, spacing: 12) {
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text("Remote upload")
-                            .font(.body)
-                        Text("Enable backend upload, sync, and AI routes for this workspace.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    Spacer(minLength: 8)
-                    Toggle("Remote upload", isOn: $backendSettings.isEnabled)
-                        .labelsHidden()
-                        .accessibilityIdentifier("ios.account.remoteUpload")
-                        .accessibilityLabel("Remote upload")
-                        .accessibilityHint("Enable backend upload, sync, and AI routes for this workspace")
-                }
-                TextField("https://api.example.com", text: $backendSettings.baseURLString)
-                    .keyboardType(.URL)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                TextField("Workspace ID", text: $backendSettings.workspaceID)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .accessibilityIdentifier("ios.account.backendWorkspaceID")
-                TextField("/v1/auth/session", text: $backendSettings.authSessionPath)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .accessibilityIdentifier("ios.account.backendAuthSessionPath")
-                TextField("/v1/workspace/snapshot", text: $backendSettings.syncPath)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                TextField("/v1/devices/apns", text: $backendSettings.pushRegistrationPath)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .accessibilityIdentifier("ios.account.backendPushRegistrationPath")
-                TextField("/v1/admin/metrics", text: $backendSettings.operationsMetricsPath)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .accessibilityIdentifier("ios.account.backendOperationsMetricsPath")
-                SecureField("Bearer token", text: $backendTokenEntry)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                Text(backendStatusMessage)
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                BackendCommandDeck(
-                    isActive: isSyncingWorkspace || isProcessingAI || isValidatingAuthSession || store.syncHealth.syncConflictStatus != nil,
-                    commands: backendCommands
-                )
-                if isSyncingWorkspace || isProcessingAI {
-                    Text("Wait for the current backend operation to finish before starting another.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
-                Text("Advanced route paths")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                TextField("/v1/recordings/upload", text: $backendSettings.uploadPath)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                TextField("/v1/objects/metadata", text: $backendSettings.objectMetadataPath)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                TextField("/v1/ai/transcriptions", text: $backendSettings.transcriptionPath)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                TextField("/v1/ai/transcription-jobs", text: $backendSettings.transcriptionJobStatusPath)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                TextField("/v1/ai/workflows/run", text: $backendSettings.workflowPath)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                TextField("/v1/ai/workflow-jobs", text: $backendSettings.workflowJobStatusPath)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .accessibilityIdentifier("ios.account.backendWorkflowJobStatusPath")
-                TextField("/v1/usage/summary", text: $backendSettings.usagePath)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                TextField("/v1/billing/app-store/reconcile", text: $backendSettings.billingReconciliationPath)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .accessibilityIdentifier("ios.account.backendBillingPath")
-                TextField("/v1/admin/status", text: $backendSettings.operationsStatusPath)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .accessibilityIdentifier("ios.account.backendOperationsStatusPath")
-                TextField("/v1/admin/backup-manifest", text: $backendSettings.backupManifestPath)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .accessibilityIdentifier("ios.account.backendBackupManifestPath")
-                TextField("/v1/admin/restore-drill", text: $backendSettings.restoreDrillPath)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .accessibilityIdentifier("ios.account.backendRestoreDrillPath")
-            }
-            .id(AccountDestination.syncConflict)
-            MobileAccountSection("Integrations") {
-                Label("GitHub export", systemImage: "checkmark.seal")
-                Label("Codex packet export", systemImage: "shippingbox")
+                .id(AccountDestination.syncConflict)
             }
                 }
                 .padding(.horizontal, 16)
@@ -5346,7 +5707,7 @@ struct AccountHubView: View {
                 scrollToRequestedDestination(using: proxy)
             }
         }
-        .navigationTitle("Account")
+        .navigationTitle("Needs Attention")
         .navigationBarTitleDisplayMode(.inline)
         .scrollContentBackground(.hidden)
         .background {
@@ -5694,16 +6055,12 @@ private struct MobileAccountSection<Content: View>: View {
                 .textCase(.uppercase)
                 .accessibilityAddTraits(.isHeader)
 
-            LazyVStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 12) {
                 content
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(14)
-            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-            .overlay {
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .stroke(.white.opacity(0.12), lineWidth: 1)
-            }
+            .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }

@@ -2,11 +2,12 @@ import AppKit
 import SwiftUI
 
 struct InspectorView: View {
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Bindable var store: IdeaForgeStore
     private let backendConfigurationManager: BackendConfigurationManager
     @State private var isRunning = false
     @State private var aiStatusMessage: String?
+    @State private var localEnrichmentStatusMessage = "Transcript: ready for local recordings. Title: checking Foundation Models availability."
+    @State private var localEnrichmentStatusGate = LocalEnrichmentStatusGate()
     @State private var accountUsageSummary: BackendAccountUsageSummary?
     @State private var aiAuthenticatedSession: BackendAuthenticatedSession?
 
@@ -20,110 +21,175 @@ struct InspectorView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                MacGlassPanel(tint: .indigo.opacity(0.12), interactive: false, isLive: isRunning) {
-                    MacInspectorCommandDeck(
-                        isRunning: isRunning,
-                        hasSelectedProject: store.selectedProject != nil,
-                        runReviewBoard: { runWorkflow("wf_app_idea_mvp") },
-                        generatePRD: { runWorkflow("wf_prd") },
-                        transcribeUploadedAudio: transcribeUploadedAudio,
-                        prepareCodexPacket: runCodexPacket,
-                        exportPacketFiles: exportCodexPacket
-                    )
-                }
-                .animation(reduceMotion ? nil : .snappy(duration: 0.24), value: isRunning)
-
-                if let error = store.lastErrorMessage {
-                    Text(error)
-                        .font(.caption)
-                        .foregroundStyle(.red)
-                }
-                if let aiStatusMessage {
-                    Text(aiStatusMessage)
+            LazyVStack(alignment: .leading, spacing: 16) {
+                MacInspectorSection(
+                    title: "Selected Idea",
+                    systemImage: "lightbulb",
+                    accessibilityIdentifier: "mac.inspector.summary"
+                ) {
+                    if let project = store.selectedProject {
+                        LabeledContent("Idea", value: project.title)
+                    } else {
+                        Text("Select an idea to use project actions.")
+                            .foregroundStyle(.secondary)
+                    }
+                    Text(localEnrichmentStatusMessage)
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityIdentifier("mac.inspector.localEnrichmentStatus")
+                        .accessibilityLabel("Local enrichment status")
+                        .accessibilityValue(localEnrichmentStatusMessage)
+                    if isRunning {
+                        ProgressView()
+                            .controlSize(.small)
+                    }
+                    if let error = store.lastErrorMessage {
+                        Text(error)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    }
+                    if let aiStatusMessage {
+                        Text(aiStatusMessage)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Divider()
+
+                MacInspectorSection(title: "Transcription & Title", systemImage: "waveform") {
+                    MacInspectorActionRow(
+                        title: "Enrich Locally",
+                        detail: "Transcript and title on this Mac",
+                        systemImage: "waveform",
+                        tint: .forgeEmber,
+                        isDisabled: inspectorActionsDisabled,
+                        accessibilityIdentifier: "mac.inspector.processLocalEnrichment",
+                        helpText: inspectorActionHelp(defaultText: "Transcribe retained audio on this Mac and generate a title when Foundation Models is available"),
+                        action: processLocalEnrichment
+                    )
+                    MacInspectorActionRow(
+                        title: "Transcribe",
+                        detail: "Use configured backend audio AI",
+                        systemImage: "waveform.badge.mic",
+                        tint: .forgeMagenta,
+                        isDisabled: inspectorActionsDisabled,
+                        accessibilityIdentifier: "mac.inspector.transcribeUploadedAudio",
+                        helpText: inspectorActionHelp(defaultText: "Transcribe uploaded recordings when backend AI is configured"),
+                        action: transcribeUploadedAudio
+                    )
                 }
 
                 Divider()
 
-                Label("Questions", systemImage: "questionmark.bubble")
-                    .font(.headline)
-                ForEach(store.pendingQuestions.prefix(4)) { question in
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(question.prompt)
-                            .font(.callout.weight(.medium))
-                        Text(question.isBlocking ? "Blocks workflow" : "Improves artifact quality")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    .padding(.vertical, 3)
+                MacInspectorSection(title: "Develop", systemImage: "sparkles") {
+                    MacInspectorActionRow(
+                        title: "Review Board",
+                        detail: "Score the selected idea",
+                        systemImage: "person.3.sequence",
+                        tint: .forgeMagenta,
+                        isDisabled: inspectorActionsDisabled,
+                        accessibilityIdentifier: "mac.inspector.runReviewBoard",
+                        helpText: inspectorActionHelp(defaultText: "Run the selected idea through the review board workflow"),
+                        action: { runWorkflow("wf_app_idea_mvp") }
+                    )
+                    MacInspectorActionRow(
+                        title: "Generate PRD",
+                        detail: "Draft a product specification",
+                        systemImage: "doc.text",
+                        tint: .forgeEmber,
+                        isDisabled: inspectorActionsDisabled,
+                        accessibilityIdentifier: "mac.inspector.generatePRD",
+                        helpText: inspectorActionHelp(defaultText: "Generate a PRD artifact for the selected idea"),
+                        action: { runWorkflow("wf_prd") }
+                    )
                 }
 
-                MacGlassPanel(
-                    tint: store.syncHealth.syncConflictStatus == nil ? .cyan.opacity(0.10) : .red.opacity(0.12),
-                    interactive: false,
-                    isLive: store.syncHealth.syncConflictStatus != nil || store.syncHealth.queuedUploads > 0
-                ) {
-                    VStack(alignment: .leading, spacing: 12) {
-                        HStack(alignment: .center, spacing: 10) {
-                            Label("Sync", systemImage: "arrow.triangle.2.circlepath")
-                                .font(.headline)
-                            Spacer(minLength: 12)
-                            MacLiveFlowRibbon(
-                                tint: store.syncHealth.syncConflictStatus == nil ? .cyan : .red,
-                                isActive: store.syncHealth.queuedUploads > 0 && !reduceMotion
-                            )
-                            .frame(width: 132, height: 16)
-                        }
-                        HStack(spacing: 10) {
-                            MacInspectorMetricPill(
-                                title: "Watch",
-                                value: store.syncHealth.watchReachable ? "Reachable" : "Offline",
-                                symbol: store.syncHealth.watchReachable ? "applewatch.radiowaves.left.and.right" : "applewatch.slash",
-                                tint: store.syncHealth.watchReachable ? .mint : .secondary
-                            )
-                            MacInspectorMetricPill(
-                                title: "Queued",
-                                value: "\(store.syncHealth.queuedUploads)",
-                                symbol: "tray",
-                                tint: .cyan
-                            )
-                            MacInspectorMetricPill(
-                                title: "Failures",
-                                value: "\(store.syncHealth.failingItems)",
-                                symbol: "exclamationmark.triangle",
-                                tint: store.syncHealth.failingItems == 0 ? .mint : .orange
-                            )
-                        }
-                        if let conflict = store.syncHealth.syncConflictStatus {
-                            Text(conflict.recoveryAction)
-                                .font(.caption)
-                                .foregroundStyle(.red)
-                                .fixedSize(horizontal: false, vertical: true)
-                            MacSyncConflictReviewList(conflict: conflict)
-                        }
-                    }
+                Divider()
+
+                MacInspectorSection(title: "Export", systemImage: "square.and.arrow.up") {
+                    MacInspectorActionRow(
+                        title: "Prepare Codex Packet",
+                        detail: "Create the implementation handoff",
+                        systemImage: "shippingbox",
+                        tint: .forgeCoral,
+                        isDisabled: inspectorActionsDisabled,
+                        accessibilityIdentifier: "mac.inspector.prepareCodexPacket",
+                        helpText: inspectorActionHelp(defaultText: "Prepare an in-app Codex packet artifact"),
+                        action: runCodexPacket
+                    )
+                    MacInspectorActionRow(
+                        title: "Export Files",
+                        detail: "Write the packet to disk",
+                        systemImage: "folder.badge.plus",
+                        tint: .forgeEmber,
+                        isDisabled: inspectorActionsDisabled,
+                        accessibilityIdentifier: "mac.inspector.exportPacketFiles",
+                        helpText: inspectorActionHelp(defaultText: "Export the selected idea packet files to disk"),
+                        action: exportCodexPacket
+                    )
                 }
 
-                MacGlassPanel(tint: .mint.opacity(0.10), interactive: false) {
-                    VStack(alignment: .leading, spacing: 12) {
-                        Label("Privacy", systemImage: "lock.shield")
-                            .font(.headline)
-                        Picker("Mode", selection: privacyModeBinding) {
-                            ForEach(PrivacyMode.allCases) { mode in
-                                Text(mode.label).tag(mode)
+                if !store.pendingQuestions.isEmpty {
+                    Divider()
+                    MacInspectorSection(title: "Questions", systemImage: "questionmark.bubble") {
+                        ForEach(store.pendingQuestions.prefix(4)) { question in
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(question.prompt)
+                                    .font(.callout.weight(.medium))
+                                Text(question.isBlocking ? "Required" : "Optional")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
                             }
+                            .padding(.vertical, 2)
                         }
-                        Text(store.privacyMode.description)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
                     }
+                }
+
+                Divider()
+
+                MacInspectorSection(title: "Sync", systemImage: "arrow.triangle.2.circlepath") {
+                    LabeledContent("Watch", value: store.syncHealth.watchReachable ? "Reachable" : "Offline")
+                    LabeledContent("Queued", value: "\(store.syncHealth.queuedUploads)")
+                    LabeledContent("Failures", value: "\(store.syncHealth.failingItems)")
+                    if let conflict = store.syncHealth.syncConflictStatus {
+                        Text(conflict.recoveryAction)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                            .fixedSize(horizontal: false, vertical: true)
+                        MacSyncConflictReviewList(conflict: conflict)
+                    }
+                }
+
+                Divider()
+
+                MacInspectorSection(title: "Privacy", systemImage: "lock.shield") {
+                    Picker("Mode", selection: privacyModeBinding) {
+                        ForEach(PrivacyMode.allCases) { mode in
+                            Text(mode.label).tag(mode)
+                        }
+                    }
+                    Text(store.privacyMode.description)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
             .padding(18)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .task {
+            await refreshLocalEnrichmentAvailability()
+        }
+    }
+
+    private var inspectorActionsDisabled: Bool {
+        isRunning || store.selectedProject == nil
+    }
+
+    private func inspectorActionHelp(defaultText: String) -> String {
+        if isRunning { return "Wait for the current action to finish" }
+        if store.selectedProject == nil { return "Select an idea before running this action" }
+        return defaultText
     }
 
     private func runWorkflow(_ templateID: String) {
@@ -193,6 +259,64 @@ struct InspectorView: View {
                 IdeaForgeLog.workflow.error("macOS backend AI processing failed")
             }
         }
+    }
+
+    private func processLocalEnrichment() {
+        guard !isRunning else { return }
+        localEnrichmentStatusGate.invalidateForEnrichmentOutcome()
+        isRunning = true
+        localEnrichmentStatusMessage = "Transcript: processing on this Mac. Title: waits for a completed transcript."
+        IdeaForgeLog.workflow.info("macOS local enrichment started")
+        Task {
+            defer { isRunning = false }
+            let services: IdeaForgeServices = localEnrichmentRuntimePolicy.usesDeterministicTranscription
+                ? .local
+                : .localSpeech
+            let summary = await store.processLocalRecordingsForSpeechTranscription(services: services)
+            localEnrichmentStatusGate.invalidateForEnrichmentOutcome()
+            localEnrichmentStatusMessage = LocalEnrichmentPresentation.outcomeMessage(summary)
+            IdeaForgeLog.workflow.info("macOS local enrichment completed; attempted: \(summary.attemptedCount, privacy: .public), completed: \(summary.completedCount, privacy: .public), failed: \(summary.failedCount, privacy: .public)")
+        }
+    }
+
+    private func refreshLocalEnrichmentAvailability() async {
+        let availabilityRevision = localEnrichmentStatusGate.beginAvailabilityCheck()
+        if localEnrichmentRuntimePolicy.usesMixedOutcomeFixture {
+            guard !isRunning,
+                  localEnrichmentStatusGate.canApplyAvailability(from: availabilityRevision) else { return }
+            localEnrichmentStatusMessage = LocalEnrichmentPresentation.outcomeMessage(
+                AIProcessingSummary(
+                    attemptedCount: 2,
+                    completedCount: 2,
+                    titleGeneratedCount: 1,
+                    titleUnavailableCount: 1,
+                    titleUnavailableReasons: [.appleIntelligenceNotEnabled: 1]
+                )
+            )
+            return
+        }
+        let candidates = store.localSpeechTranscriptionCandidates()
+        let titleAvailabilities: [IdeaTitleGenerationAvailability]
+        if localEnrichmentRuntimePolicy.usesUnavailableFoundationFixture {
+            titleAvailabilities = candidates.map { _ in .deviceNotEligible }
+        } else {
+            let generator = SystemFoundationTitleGenerator()
+            var resolved: [IdeaTitleGenerationAvailability] = []
+            for recording in candidates {
+                resolved.append(await generator.availability(for: recording.languageHint))
+            }
+            titleAvailabilities = resolved
+        }
+        guard !isRunning,
+              localEnrichmentStatusGate.canApplyAvailability(from: availabilityRevision) else { return }
+        localEnrichmentStatusMessage = LocalEnrichmentPresentation.preflightMessage(
+            availabilities: titleAvailabilities,
+            readyLocation: "this Mac"
+        )
+    }
+
+    private var localEnrichmentRuntimePolicy: LocalEnrichmentRuntimePolicy {
+        LocalEnrichmentRuntimePolicy(arguments: ProcessInfo.processInfo.arguments)
     }
 
     private func runCodexPacket() {
@@ -806,184 +930,81 @@ private extension WorkspaceSyncConflictReviewItem {
     }
 }
 
-private struct MacInspectorCommandDeck: View {
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    var isRunning: Bool
-    var hasSelectedProject: Bool
-    var runReviewBoard: () -> Void
-    var generatePRD: () -> Void
-    var transcribeUploadedAudio: () -> Void
-    var prepareCodexPacket: () -> Void
-    var exportPacketFiles: () -> Void
+private struct MacInspectorSection<Content: View>: View {
+    var title: String
+    var systemImage: String
+    var accessibilityIdentifier: String?
+    private let content: () -> Content
 
-    private var isDeckDisabled: Bool { isRunning || !hasSelectedProject }
-
-    private var deckHelpText: String {
-        if isRunning {
-            return "Wait for the current AI action to finish"
-        }
-        if !hasSelectedProject {
-            return "Select an idea project before running AI commands"
-        }
-        return ""
-    }
-
-    private var deckStatusText: String {
-        if isRunning {
-            return "Running the selected command."
-        }
-        if !hasSelectedProject {
-            return "Select an idea project to unlock AI commands."
-        }
-        return "Pick a focused action for the selected idea."
+    init(
+        title: String,
+        systemImage: String,
+        accessibilityIdentifier: String? = nil,
+        @ViewBuilder content: @escaping () -> Content
+    ) {
+        self.title = title
+        self.systemImage = systemImage
+        self.accessibilityIdentifier = accessibilityIdentifier
+        self.content = content
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack(alignment: .center, spacing: 12) {
-                Label("AI Command Deck", systemImage: "sparkles")
-                    .font(.title3.weight(.semibold))
-                Spacer(minLength: 12)
-                MacSignalRibbon(tint: isRunning ? .orange : .indigo, isActive: isRunning && !reduceMotion)
+        VStack(alignment: .leading, spacing: 10) {
+            if let accessibilityIdentifier {
+                sectionLabel
+                    .accessibilityIdentifier(accessibilityIdentifier)
+            } else {
+                sectionLabel
             }
-
-            Text(deckStatusText)
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 132), spacing: 10)], spacing: 10) {
-                MacInspectorCommandButton(
-                    title: "Review Board",
-                    subtitle: "Score the idea",
-                    systemImage: "person.3.sequence",
-                    tint: .indigo,
-                    isDisabled: isDeckDisabled,
-                    accessibilityIdentifier: "mac.inspector.runReviewBoard",
-                    helpText: !deckHelpText.isEmpty ? deckHelpText : "Run the selected idea through the review board workflow",
-                    action: runReviewBoard
-                )
-                MacInspectorCommandButton(
-                    title: "Generate PRD",
-                    subtitle: "Draft product spec",
-                    systemImage: "doc.text",
-                    tint: .cyan,
-                    isDisabled: isDeckDisabled,
-                    accessibilityIdentifier: "mac.inspector.generatePRD",
-                    helpText: !deckHelpText.isEmpty ? deckHelpText : "Generate a PRD artifact for the selected idea",
-                    action: generatePRD
-                )
-                MacInspectorCommandButton(
-                    title: "Transcribe",
-                    subtitle: "Backend audio AI",
-                    systemImage: "waveform.badge.mic",
-                    tint: .mint,
-                    isDisabled: isDeckDisabled,
-                    accessibilityIdentifier: "mac.inspector.transcribeUploadedAudio",
-                    helpText: !deckHelpText.isEmpty ? deckHelpText : "Transcribe uploaded recordings when backend AI is configured",
-                    action: transcribeUploadedAudio
-                )
-                MacInspectorCommandButton(
-                    title: "Codex Packet",
-                    subtitle: "Prepare handoff",
-                    systemImage: "shippingbox",
-                    tint: .orange,
-                    isDisabled: isDeckDisabled,
-                    accessibilityIdentifier: "mac.inspector.prepareCodexPacket",
-                    helpText: !deckHelpText.isEmpty ? deckHelpText : "Prepare an in-app Codex packet artifact",
-                    action: prepareCodexPacket
-                )
-                MacInspectorCommandButton(
-                    title: "Export Files",
-                    subtitle: "Write packet",
-                    systemImage: "folder.badge.plus",
-                    tint: .teal,
-                    isDisabled: isDeckDisabled,
-                    accessibilityIdentifier: "mac.inspector.exportPacketFiles",
-                    helpText: !deckHelpText.isEmpty ? deckHelpText : "Export the selected idea packet files to disk",
-                    action: exportPacketFiles
-                )
-            }
-
-            if isRunning {
-                ProgressView()
-                    .controlSize(.small)
-                    .transition(.opacity.combined(with: .scale(scale: 0.96)))
-            }
+            content()
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var sectionLabel: some View {
+        Label(title, systemImage: systemImage)
+            .font(.headline)
+            .foregroundStyle(.primary)
     }
 }
 
-private struct MacInspectorCommandButton: View {
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+private struct MacInspectorActionRow: View {
     var title: String
-    var subtitle: String
+    var detail: String
     var systemImage: String
     var tint: Color
     var isDisabled: Bool
     var accessibilityIdentifier: String
     var helpText: String
     var action: () -> Void
-    @State private var isHovering = false
 
     var body: some View {
         Button(action: action) {
-            VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
                 Image(systemName: systemImage)
-                    .font(.title3.weight(.semibold))
-                    .foregroundStyle(isDisabled ? .secondary : tint)
-                Text(title)
-                    .font(.callout.weight(.semibold))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.78)
-                Text(subtitle)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
+                    .font(.body.weight(.semibold))
+                    .foregroundStyle(isDisabled ? Color.secondary : tint)
+                    .frame(width: 22)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(.callout.weight(.semibold))
+                    Text(detail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+                Spacer(minLength: 8)
+                Image(systemName: "chevron.right")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.tertiary)
             }
-            .padding(12)
-            .frame(maxWidth: .infinity, minHeight: 104, alignment: .leading)
-            .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-            .overlay {
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .strokeBorder(tint.opacity(isHovering && !isDisabled ? 0.34 : 0.16))
-            }
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .disabled(isDisabled)
+        .padding(.vertical, 5)
         .accessibilityIdentifier(accessibilityIdentifier)
         .help(helpText)
-        .scaleEffect(isHovering && !isDisabled && !reduceMotion ? 1.018 : 1)
-        .animation(reduceMotion ? nil : .snappy(duration: 0.16), value: isHovering)
-        .onHover { isHovering = $0 }
-    }
-}
-
-private struct MacInspectorMetricPill: View {
-    var title: String
-    var value: String
-    var symbol: String
-    var tint: Color
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            Label(title, systemImage: symbol)
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(tint)
-                .lineLimit(1)
-                .minimumScaleFactor(0.78)
-            Text(value)
-                .font(.callout.monospacedDigit().weight(.semibold))
-                .lineLimit(1)
-                .minimumScaleFactor(0.78)
-        }
-        .padding(10)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 13, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 13, style: .continuous)
-                .strokeBorder(tint.opacity(0.16))
-        }
     }
 }
 
@@ -995,6 +1016,8 @@ struct SettingsView: View {
     private static let syncConflictResolverAnchor = "mac.settings.syncConflictResolver.anchor"
     @State private var backendSettings = BackendConnectionSettings()
     @State private var backendTokenEntry = ""
+    @State private var localBackendPairingCode = ""
+    @State private var isPairingLocalBackend = false
     @State private var backendStatusMessage = "Local upload fallback active."
     @State private var isSyncingWorkspace = false
     @State private var authenticatedSession: BackendAuthenticatedSession?
@@ -1045,8 +1068,14 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
             }
 
-            Section("Backend Upload") {
-                Toggle("Remote upload", isOn: $backendSettings.isEnabled)
+            Section("Backend Connection") {
+                Toggle("Backend sync", isOn: $backendSettings.isEnabled)
+                Picker("Connection", selection: $backendSettings.connectionKind) {
+                    ForEach(BackendConnectionKind.allCases) { kind in
+                        Text(kind.label).tag(kind)
+                    }
+                }
+                .accessibilityIdentifier("mac.settings.backendConnectionKind")
                 TextField("Base URL", text: $backendSettings.baseURLString)
                     .textFieldStyle(.roundedBorder)
                 TextField("Workspace ID", text: $backendSettings.workspaceID)
@@ -1091,6 +1120,24 @@ struct SettingsView: View {
                     .help("Backend admin endpoint that exposes privacy-safe monitoring metrics for queues, storage, jobs, and usage")
                 SecureField("Bearer token", text: $backendTokenEntry)
                     .textFieldStyle(.roundedBorder)
+                if backendSettings.connectionKind == .localBackend {
+                    SecureField("Five-minute pairing code", text: $localBackendPairingCode)
+                        .textFieldStyle(.roundedBorder)
+                        .accessibilityIdentifier("mac.settings.localBackendPairingCode")
+                    Button {
+                        Task { await pairLocalBackend() }
+                    } label: {
+                        Label(
+                            isPairingLocalBackend ? "Pairing" : "Pair Local Backend",
+                            systemImage: "link.badge.plus"
+                        )
+                    }
+                    .disabled(isPairingLocalBackend)
+                    .accessibilityIdentifier("mac.settings.pairLocalBackend")
+                    Text("Sync stays on your private LAN. OpenAI is optional, disabled by default, and never a fallback.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
                 Text(backendStatusMessage)
                     .font(.footnote)
                     .foregroundStyle(.secondary)
@@ -1290,13 +1337,21 @@ struct SettingsView: View {
             if !backendSettings.isEnabled {
                 backendStatusMessage = "Local upload fallback active."
             } else if !backendSettings.hasValidBaseURL {
-                backendStatusMessage = "Remote upload needs a valid https:// URL."
+                backendStatusMessage = backendSettings.connectionKind == .localBackend
+                    ? "Local Backend needs a private-LAN https:// URL."
+                    : "Remote upload needs a valid https:// URL."
             } else if backendSettings.normalizedWorkspaceID.isEmpty {
-                backendStatusMessage = "Remote upload needs a workspace ID."
+                backendStatusMessage = backendSettings.connectionKind == .localBackend
+                    ? "Local Backend needs pairing."
+                    : "Remote upload needs a workspace ID."
             } else if hasToken {
-                backendStatusMessage = "Remote upload configured."
+                backendStatusMessage = backendSettings.connectionKind == .localBackend
+                    ? "Local Backend configured on your private LAN."
+                    : "Remote upload configured."
             } else {
-                backendStatusMessage = "Remote upload needs a bearer token."
+                backendStatusMessage = backendSettings.connectionKind == .localBackend
+                    ? "Local Backend needs pairing."
+                    : "Remote upload needs a bearer token."
             }
             IdeaForgeLog.settings.info("macOS backend settings loaded; enabled: \(backendSettings.isEnabled, privacy: .public)")
         } catch {
@@ -1329,6 +1384,50 @@ struct SettingsView: View {
         } catch {
             backendStatusMessage = "Backend settings could not be saved."
             IdeaForgeLog.settings.error("macOS backend settings could not be saved")
+        }
+    }
+
+    @MainActor
+    private func pairLocalBackend() async {
+        guard !isPairingLocalBackend else { return }
+        guard backendSettings.connectionKind == .localBackend,
+              let baseURL = backendSettings.normalizedBaseURL,
+              BackendEndpointPolicy.allowsLocalBackend(baseURL) else {
+            backendStatusMessage = "Enter a valid private-LAN https:// endpoint."
+            return
+        }
+        let code = localBackendPairingCode.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !code.isEmpty else {
+            backendStatusMessage = "Enter a five-minute pairing code."
+            return
+        }
+        isPairingLocalBackend = true
+        defer { isPairingLocalBackend = false }
+        do {
+            let deviceLabel = Host.current().localizedName ?? "IdeaForge Mac"
+            let credential = try await LocalBackendPairingClient(
+                configuration: LocalBackendPairingConfiguration(baseURL: baseURL)
+            ).pair(code: code, deviceLabel: deviceLabel)
+            try backendConfigurationManager.saveLocalPairing(
+                baseURL: baseURL,
+                credential: credential
+            )
+            localBackendPairingCode = ""
+            backendTokenEntry = ""
+            authenticatedSession = nil
+            loadBackendConfiguration()
+            backendStatusMessage = "Local Backend paired. Validate the session, then sync."
+        } catch let error as LocalBackendPairingError {
+            switch error {
+            case .rejected:
+                backendStatusMessage = "Pairing code is invalid, expired, or already used."
+            case .invalidResponse:
+                backendStatusMessage = "Local Backend returned an invalid pairing response."
+            }
+        } catch let error as URLError where error.code == .serverCertificateUntrusted {
+            backendStatusMessage = "Certificate is not trusted. Install the Local Backend CA in Keychain."
+        } catch {
+            backendStatusMessage = "Local Backend pairing failed. Check LAN reachability and certificate setup."
         }
     }
 
@@ -1392,8 +1491,18 @@ struct SettingsView: View {
                 backendStatusMessage = conflict.report.message
                 IdeaForgeLog.sync.error("macOS workspace backend sync blocked by conflict; local upload jobs: \(conflict.report.localOnlyUploadJobIDs.count, privacy: .public), local recordings: \(conflict.report.localOnlyRecordingIDs.count, privacy: .public)")
             } catch {
-                backendStatusMessage = "Workspace sync failed."
-                IdeaForgeLog.sync.error("macOS workspace backend sync failed")
+                let diagnostic = WorkspaceSyncFailureDiagnostic.classify(error)
+                backendStatusMessage = diagnostic.userFacingMessage
+                store.recordSyncActivity(
+                    WorkspaceSyncActivityReceipt(
+                        source: .manualPublish,
+                        status: .failed,
+                        title: diagnostic.receiptTitle,
+                        detail: diagnostic.userFacingMessage,
+                        occurredAt: Date()
+                    )
+                )
+                IdeaForgeLog.sync.error("macOS workspace backend sync failed; category: \(diagnostic.category.rawValue, privacy: .public)")
             }
         }
     }
@@ -1534,6 +1643,12 @@ struct SettingsView: View {
                 authStatusMessage = "Enter a valid https:// backend URL."
                 authenticatedSession = nil
                 IdeaForgeLog.settings.error("macOS backend session validation failed; invalid backend URL")
+            } catch BackendAuthError.unauthorized {
+                try? backendConfigurationManager.clearCredentials()
+                authStatusMessage = "Device token was rejected or revoked. Pair this Mac again."
+                backendStatusMessage = "Local Backend pairing is no longer valid."
+                authenticatedSession = nil
+                IdeaForgeLog.settings.error("macOS backend device authorization was rejected")
             } catch {
                 authStatusMessage = "Backend session validation failed."
                 authenticatedSession = nil

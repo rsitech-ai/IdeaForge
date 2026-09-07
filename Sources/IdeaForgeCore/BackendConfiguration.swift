@@ -3,6 +3,20 @@ import Foundation
 import Security
 #endif
 
+public enum BackendConnectionKind: String, Codable, CaseIterable, Identifiable, Equatable, Sendable {
+    case remoteService
+    case localBackend
+
+    public var id: String { rawValue }
+
+    public var label: String {
+        switch self {
+        case .remoteService: "Remote Service"
+        case .localBackend: "Local Backend"
+        }
+    }
+}
+
 public struct BackendConnectionSettings: Codable, Equatable, Sendable {
     public var baseURLString: String
     public var authSessionPath: String
@@ -22,6 +36,7 @@ public struct BackendConnectionSettings: Codable, Equatable, Sendable {
     public var pushRegistrationPath: String
     public var workspaceID: String
     public var isEnabled: Bool
+    public var connectionKind: BackendConnectionKind
 
     public init(
         baseURLString: String = "",
@@ -41,7 +56,8 @@ public struct BackendConnectionSettings: Codable, Equatable, Sendable {
         operationsMetricsPath: String = "/v1/admin/metrics",
         pushRegistrationPath: String = "/v1/devices/apns",
         workspaceID: String = "",
-        isEnabled: Bool = false
+        isEnabled: Bool = false,
+        connectionKind: BackendConnectionKind = .remoteService
     ) {
         self.baseURLString = baseURLString
         self.authSessionPath = authSessionPath
@@ -61,6 +77,7 @@ public struct BackendConnectionSettings: Codable, Equatable, Sendable {
         self.pushRegistrationPath = pushRegistrationPath
         self.workspaceID = workspaceID
         self.isEnabled = isEnabled
+        self.connectionKind = connectionKind
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -82,6 +99,7 @@ public struct BackendConnectionSettings: Codable, Equatable, Sendable {
         case pushRegistrationPath
         case workspaceID
         case isEnabled
+        case connectionKind
     }
 
     public init(from decoder: Decoder) throws {
@@ -104,6 +122,7 @@ public struct BackendConnectionSettings: Codable, Equatable, Sendable {
         pushRegistrationPath = try container.decodeIfPresent(String.self, forKey: .pushRegistrationPath) ?? "/v1/devices/apns"
         workspaceID = try container.decodeIfPresent(String.self, forKey: .workspaceID) ?? ""
         isEnabled = try container.decodeIfPresent(Bool.self, forKey: .isEnabled) ?? false
+        connectionKind = try container.decodeIfPresent(BackendConnectionKind.self, forKey: .connectionKind) ?? .remoteService
     }
 
     public var normalizedBaseURL: URL? {
@@ -113,7 +132,11 @@ public struct BackendConnectionSettings: Codable, Equatable, Sendable {
     }
 
     public var hasValidBaseURL: Bool {
-        normalizedBaseURL.map(BackendEndpointPolicy.allows) ?? false
+        normalizedBaseURL.map {
+            connectionKind == .localBackend
+                ? BackendEndpointPolicy.allowsLocalBackend($0)
+                : BackendEndpointPolicy.allows($0)
+        } ?? false
     }
 
     public var normalizedAuthSessionPath: String {
@@ -229,6 +252,26 @@ public enum BackendEndpointPolicy {
         }
         let host = rawHost.trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
         return host == "localhost" || host == "127.0.0.1" || host == "::1"
+    }
+
+    public static func allowsLocalBackend(_ baseURL: URL) -> Bool {
+        guard allows(baseURL), baseURL.scheme?.lowercased() == "https",
+              let host = baseURL.host?.lowercased() else {
+            return false
+        }
+        if host == "localhost" || host == "::1" || host.hasSuffix(".local") {
+            return true
+        }
+        let components = host.split(separator: ".")
+        let octets = components.compactMap { UInt8($0) }
+        guard components.count == 4, octets.count == 4 else {
+            return host.hasPrefix("fc") || host.hasPrefix("fd") || host.hasPrefix("fe8") || host.hasPrefix("fe9") || host.hasPrefix("fea") || host.hasPrefix("feb")
+        }
+        return octets[0] == 10
+            || octets[0] == 127
+            || (octets[0] == 169 && octets[1] == 254)
+            || (octets[0] == 172 && (16...31).contains(octets[1]))
+            || (octets[0] == 192 && octets[1] == 168)
     }
 }
 
@@ -473,6 +516,34 @@ public struct BackendConfigurationManager: Sendable {
         }
     }
 
+    public func saveLocalPairing(
+        baseURL: URL,
+        credential: LocalBackendDeviceCredential
+    ) throws {
+        guard BackendEndpointPolicy.allowsLocalBackend(baseURL),
+              !credential.workspaceID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !credential.bearerToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw BackendConfigurationError.missingRequiredConfiguration
+        }
+        let oldToken = try credentialStore.loadBearerToken()
+        do {
+            try credentialStore.saveBearerToken(credential.bearerToken)
+            var settings = try settingsStore.loadSettings()
+            settings.baseURLString = baseURL.absoluteString
+            settings.workspaceID = credential.workspaceID
+            settings.isEnabled = true
+            settings.connectionKind = .localBackend
+            try settingsStore.saveSettings(settings)
+        } catch {
+            if let oldToken {
+                try? credentialStore.saveBearerToken(oldToken)
+            } else {
+                try? credentialStore.clearBearerToken()
+            }
+            throw error
+        }
+    }
+
     public func clearCredentials() throws {
         try credentialStore.clearBearerToken()
     }
@@ -484,7 +555,7 @@ public struct BackendConfigurationManager: Sendable {
         }
 
         guard let baseURL = settings.normalizedBaseURL,
-              BackendEndpointPolicy.allows(baseURL) else {
+              settings.hasValidBaseURL else {
             throw BackendConfigurationError.invalidBaseURL(settings.baseURLString)
         }
 
@@ -514,7 +585,7 @@ public struct BackendConfigurationManager: Sendable {
         }
 
         guard let baseURL = settings.normalizedBaseURL,
-              BackendEndpointPolicy.allows(baseURL) else {
+              settings.hasValidBaseURL else {
             throw BackendConfigurationError.invalidBaseURL(settings.baseURLString)
         }
 
@@ -544,7 +615,7 @@ public struct BackendConfigurationManager: Sendable {
         }
 
         guard let baseURL = settings.normalizedBaseURL,
-              BackendEndpointPolicy.allows(baseURL) else {
+              settings.hasValidBaseURL else {
             throw BackendConfigurationError.invalidBaseURL(settings.baseURLString)
         }
 
@@ -567,6 +638,31 @@ public struct BackendConfigurationManager: Sendable {
         )
     }
 
+    public func resolvedEnrichmentConfiguration() throws -> BackendEnrichmentConfiguration? {
+        let settings = try settingsStore.loadSettings()
+        guard settings.isEnabled else {
+            return nil
+        }
+        guard let baseURL = settings.normalizedBaseURL,
+              settings.hasValidBaseURL else {
+            throw BackendConfigurationError.invalidBaseURL(settings.baseURLString)
+        }
+        guard let token = try credentialStore.loadBearerToken()?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+            !token.isEmpty else {
+            return nil
+        }
+        let workspaceID = settings.normalizedWorkspaceID
+        guard !workspaceID.isEmpty else {
+            return nil
+        }
+        return BackendEnrichmentConfiguration(
+            baseURL: baseURL,
+            bearerToken: token,
+            workspaceID: workspaceID
+        )
+    }
+
     public func resolvedAIConfiguration() throws -> BackendAIConfiguration? {
         let settings = try settingsStore.loadSettings()
         guard settings.isEnabled else {
@@ -574,7 +670,7 @@ public struct BackendConfigurationManager: Sendable {
         }
 
         guard let baseURL = settings.normalizedBaseURL,
-              BackendEndpointPolicy.allows(baseURL) else {
+              settings.hasValidBaseURL else {
             throw BackendConfigurationError.invalidBaseURL(settings.baseURLString)
         }
 
@@ -608,7 +704,7 @@ public struct BackendConfigurationManager: Sendable {
         }
 
         guard let baseURL = settings.normalizedBaseURL,
-              BackendEndpointPolicy.allows(baseURL) else {
+              settings.hasValidBaseURL else {
             throw BackendConfigurationError.invalidBaseURL(settings.baseURLString)
         }
 
@@ -638,7 +734,7 @@ public struct BackendConfigurationManager: Sendable {
         }
 
         guard let baseURL = settings.normalizedBaseURL,
-              BackendEndpointPolicy.allows(baseURL) else {
+              settings.hasValidBaseURL else {
             throw BackendConfigurationError.invalidBaseURL(settings.baseURLString)
         }
 
@@ -668,7 +764,7 @@ public struct BackendConfigurationManager: Sendable {
         }
 
         guard let baseURL = settings.normalizedBaseURL,
-              BackendEndpointPolicy.allows(baseURL) else {
+              settings.hasValidBaseURL else {
             throw BackendConfigurationError.invalidBaseURL(settings.baseURLString)
         }
 
@@ -701,7 +797,7 @@ public struct BackendConfigurationManager: Sendable {
         }
 
         guard let baseURL = settings.normalizedBaseURL,
-              BackendEndpointPolicy.allows(baseURL) else {
+              settings.hasValidBaseURL else {
             throw BackendConfigurationError.invalidBaseURL(settings.baseURLString)
         }
 

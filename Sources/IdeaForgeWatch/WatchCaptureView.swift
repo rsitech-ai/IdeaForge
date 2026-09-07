@@ -1,7 +1,17 @@
 import SwiftUI
+import WatchKit
+
+extension Color {
+    static let forgeAubergine = Color(red: 0.17, green: 0.025, blue: 0.23)
+    static let forgeEmber = Color(red: 1.00, green: 0.48, blue: 0.08)
+    static let forgeCoral = Color(red: 1.00, green: 0.18, blue: 0.25)
+    static let forgeMagenta = Color(red: 0.86, green: 0.06, blue: 0.34)
+    static let forgeSpark = Color(red: 1.00, green: 0.95, blue: 0.72)
+}
 
 struct WatchCaptureView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Bindable var store: IdeaForgeStore
     @State private var isRecording = false
     @State private var selectedTag: IdeaTag = .appIdea
@@ -25,20 +35,20 @@ struct WatchCaptureView: View {
         if isRecording { return .red }
         if transferStatus == .queuedForTransfer || transferStatus == .received { return .green }
         if transferStatus == .failed { return .orange }
-        return .cyan
+        return .forgeEmber
     }
 
     private var captureTitle: String {
         if isRecording { return "Recording" }
-        return recordingCount == 0 ? "Tap to record" : "Ready"
+        return recordingCount == 0 ? "Record idea" : "Record again"
     }
 
     private var captureDetail: String {
-        if isRecording { return "Tap the ring again to stop. Voice pulse follows your speech." }
-        if transferStatus == .queuedForTransfer { return "Last clip is sending to iPhone." }
-        if transferStatus == .received { return "Last clip was imported on iPhone." }
-        if transferStatus == .failed { return "Clip stayed on Watch. Retry when iPhone is nearby." }
-        return "Capture offline, then sync when your iPhone is available."
+        if isRecording { return "Tap to stop · stays on Watch" }
+        if transferStatus == .queuedForTransfer { return "Sending when iPhone is ready" }
+        if transferStatus == .received { return "iPhone acknowledged import" }
+        if transferStatus == .failed { return "Audio is safe · retry later" }
+        return "Works offline · relays to iPhone"
     }
 
     private var watchProjects: [IdeaProject] {
@@ -81,153 +91,93 @@ struct WatchCaptureView: View {
             .sorted { lhs, rhs in lhs.recording.createdAt > rhs.recording.createdAt }
     }
 
+    private var relayState: WatchCaptureRelayState {
+        WatchCaptureRelayPolicy.state(
+            isRecording: isRecording,
+            transientTransferStatus: transferStatus,
+            recordings: watchProjects.flatMap(\.recordings)
+        )
+    }
+
     var body: some View {
         NavigationStack {
             ZStack {
-                WatchAmbientBackdrop(tint: liveTint, isActive: isRecording || transferStatus != .unavailable)
+                ForgeRelayBackdrop(tint: liveTint)
 
                 ScrollView {
-                    VStack(spacing: 12) {
-                        Text("IdeaForge")
-                            .font(.headline.weight(.semibold))
-                            .foregroundStyle(.primary)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.horizontal, 2)
+                    VStack(spacing: 5) {
+                        if !dynamicTypeSize.isAccessibilitySize {
+                            ForgeRelayHeader(
+                                pendingCount: pendingWatchRecordings.count,
+                                isRecording: isRecording
+                            )
+                        }
 
-                        WatchCaptureHero(
+                        ForgeCaptureSurface(
                             title: captureTitle,
                             detail: captureDetail,
                             tint: liveTint,
                             isRecording: isRecording,
                             audioLevel: voiceLevel,
-                            queuedCount: pendingWatchRecordings.count,
-                            questionCount: store.pendingQuestions.count,
                             actionLabel: isRecording ? "Stop recording" : "\(recordButtonTitle) on Apple Watch"
                         ) {
-                            Task {
-                                await toggleRecording()
-                            }
+                            Task { await toggleRecording() }
                         }
 
-                        WatchRecordingsPanel(
-                            recordingCount: recordingCount,
-                            pendingCount: pendingWatchRecordings.count,
-                            recordings: Array(recentWatchRecordingItems.prefix(5)),
-                            selectedProjectID: $captureTargetID,
-                            newIdeaTargetID: Self.newIdeaTargetID,
-                            isRecording: isRecording
+                        ForgeRelayTrack(
+                            state: relayState,
+                            pendingCount: pendingWatchRecordings.count
                         )
 
-                        WatchGlassPanel(tint: transferStatus.watchTint, isLive: transferStatus != .unavailable) {
-                            VStack(alignment: .leading, spacing: 9) {
-                                WatchPanelHeader(
-                                    title: "Sync",
-                                    detail: transferStatus.watchActionLabel,
-                                    symbol: transferStatus.watchSymbol,
-                                    tint: transferStatus.watchTint,
-                                    isLive: transferStatus != .unavailable
-                                )
-
-                                if let transferFailureMessage {
-                                    Label(transferFailureMessage, systemImage: "exclamationmark.triangle.fill")
-                                        .font(.caption2)
-                                        .foregroundStyle(.orange)
-                                        .fixedSize(horizontal: false, vertical: true)
-                                        .accessibilityIdentifier("watch.capture.transferFailure")
-                                } else if pendingWatchRecordings.isEmpty {
-                                    Label("No Watch clips waiting.", systemImage: "checkmark.circle")
-                                        .font(.caption2)
-                                        .foregroundStyle(.secondary)
-                                } else {
-                                    Label("\(pendingWatchRecordings.count) Watch clip\(pendingWatchRecordings.count == 1 ? "" : "s") waiting.", systemImage: "clock")
-                                        .font(.caption2)
-                                        .foregroundStyle(.yellow)
-                                }
-
-                                if store.retryableWatchTransferRecording != nil {
-                                    Button {
-                                        Task {
-                                            await retryWatchTransfer()
-                                        }
-                                    } label: {
-                                        Label("Retry Send", systemImage: "arrow.clockwise")
-                                            .frame(maxWidth: .infinity)
-                                    }
-                                    .buttonStyle(.bordered)
-                                    .tint(.orange)
-                                    .disabled(isRecording)
-                                    .accessibilityIdentifier("watch.capture.retryTransfer")
-                                    .accessibilityHint("Retry sending the latest local Watch recording to iPhone")
-                                }
+                        if isRecording {
+                            WatchMarkerButton(isRecording: true) {
+                                addMarker()
                             }
+                            .transition(.opacity.combined(with: .scale(scale: 0.96)))
                         }
 
-                        WatchGlassPanel(tint: liveTint, isLive: isRecording || selectedAppendProject != nil) {
-                            VStack(spacing: 10) {
-                                WatchPanelHeader(
-                                    title: "Options",
-                                    detail: selectedAppendProject == nil ? "New idea" : "Appending next clip",
-                                    symbol: "slider.horizontal.3",
-                                    tint: liveTint,
-                                    isLive: isRecording || selectedAppendProject != nil
-                                )
-
-                                WatchCaptureTargetPicker(
-                                    selection: $captureTargetID,
-                                    projects: Array(watchProjects.prefix(5)),
-                                    newIdeaTargetID: Self.newIdeaTargetID,
-                                    isDisabled: isRecording
-                                )
-
-                                if let selectedAppendProject {
-                                    Label("Appending to \(selectedAppendProject.title)", systemImage: "plus.bubble")
-                                        .font(.caption2.weight(.semibold))
-                                        .foregroundStyle(.cyan)
-                                        .lineLimit(2)
-                                        .frame(maxWidth: .infinity, alignment: .leading)
-                                        .accessibilityIdentifier("watch.capture.appendTarget")
-                                }
-
-                                WatchIdeaTagPicker(selectedTag: $selectedTag)
-
-                                WatchMarkerButton(isRecording: isRecording) {
-                                    do {
-                                        try recorder.addMarker()
-                                    } catch {
-                                        store.lastErrorMessage = (error as? UserFacingIdeaForgeError)?.userFacingMessage
-                                            ?? "Marker recovery state could not be saved."
-                                    }
-                                }
-
-                                if !isRecording {
-                                    Text("Markers are available while recording.")
-                                        .font(.caption2)
-                                        .foregroundStyle(.secondary)
-                                        .frame(maxWidth: .infinity, alignment: .leading)
-                                }
+                        NavigationLink {
+                            WatchCaptureDetails(
+                                recordingCount: recordingCount,
+                                pendingCount: pendingWatchRecordings.count,
+                                recordings: Array(recentWatchRecordingItems.prefix(5)),
+                                selectedProjectID: $captureTargetID,
+                                selectedTag: $selectedTag,
+                                projects: Array(watchProjects.prefix(5)),
+                                newIdeaTargetID: Self.newIdeaTargetID,
+                                isRecording: isRecording,
+                                transferState: relayState,
+                                transferFailureMessage: transferFailureMessage,
+                                canRetryTransfer: store.retryableWatchTransferRecording != nil,
+                                questions: Array(store.pendingQuestions.prefix(2)),
+                                onRetryTransfer: { Task { await retryWatchTransfer() } }
+                            )
+                        } label: {
+                            HStack(spacing: 8) {
+                                Image(systemName: "tray.full")
+                                    .foregroundStyle(Color.forgeEmber)
+                                Text("Saved & setup")
+                                    .font(.caption.weight(.semibold))
+                                Spacer(minLength: 0)
+                                Text("\(recordingCount)")
+                                    .font(.caption2.monospacedDigit())
+                                    .foregroundStyle(.secondary)
+                                Image(systemName: "chevron.right")
+                                    .font(.caption2.weight(.bold))
+                                    .foregroundStyle(.tertiary)
                             }
+                            .padding(.horizontal, 10)
+                            .frame(minHeight: 42)
+                            .background(.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
                         }
-
-                        if !store.pendingQuestions.isEmpty {
-                            WatchGlassPanel(tint: .indigo, isLive: true) {
-                                VStack(alignment: .leading, spacing: 9) {
-                                    WatchPanelHeader(
-                                        title: "Questions",
-                                        detail: "\(store.pendingQuestions.count) pending",
-                                        symbol: "questionmark.bubble.fill",
-                                        tint: .indigo,
-                                        isLive: true
-                                    )
-
-                                    ForEach(store.pendingQuestions.prefix(2)) { question in
-                                        WatchQuestionRow(question: question)
-                                    }
-                                }
-                            }
-                        }
+                        .buttonStyle(.plain)
+                        .accessibilityIdentifier("watch.capture.savedSetup")
+                        .disabled(isRecording)
+                        .opacity(isRecording ? 0.45 : 1)
                     }
-                    .padding(.horizontal, 4)
-                    .padding(.bottom, 12)
+                    .padding(.horizontal, 2)
+                    .padding(.bottom, 10)
+                    .animation(reduceMotion ? nil : .snappy(duration: 0.22), value: isRecording)
                 }
             }
             .navigationTitle("")
@@ -240,14 +190,17 @@ struct WatchCaptureView: View {
                         if store.markRecordingTransferredToIPhone(recordingID: recordingID) {
                             transferStatus = .received
                             transferFailureMessage = nil
+                            WKInterfaceDevice.current().play(.success)
                         } else {
                             transferStatus = .failed
                             transferFailureMessage = "iPhone imported this clip, but Watch could not save the receipt. Retry to confirm it."
+                            WKInterfaceDevice.current().play(.failure)
                         }
                     } else {
                         transferStatus = .failed
                         transferFailureMessage = "iPhone did not import this clip. Retry when both devices are ready."
                         _ = store.markRecordingWatchTransferFailed(recordingID: recordingID)
+                        WKInterfaceDevice.current().play(.failure)
                     }
                 }
                 transferService.activate()
@@ -298,6 +251,7 @@ struct WatchCaptureView: View {
                     targetProjectID: appendProject?.id
                 ) {
                     try recorder.acknowledgePersistence()
+                    WKInterfaceDevice.current().play(.success)
                     attemptTransfer(recording: recording)
                 }
             } else {
@@ -316,12 +270,25 @@ struct WatchCaptureView: View {
                 )
                 voiceLevel = recorder.normalizedPowerLevel
                 isRecording = true
+                WKInterfaceDevice.current().play(.start)
             }
         } catch {
             isRecording = false
             voiceLevel = 0
             store.lastErrorMessage = (error as? UserFacingIdeaForgeError)?.userFacingMessage ?? "Recording failed."
+            WKInterfaceDevice.current().play(.failure)
             IdeaForgeLog.recording.error("watchOS recording control failed")
+        }
+    }
+
+    private func addMarker() {
+        do {
+            try recorder.addMarker()
+            WKInterfaceDevice.current().play(.click)
+        } catch {
+            store.lastErrorMessage = (error as? UserFacingIdeaForgeError)?.userFacingMessage
+                ?? "Marker recovery state could not be saved."
+            WKInterfaceDevice.current().play(.failure)
         }
     }
 
@@ -352,6 +319,7 @@ struct WatchCaptureView: View {
                 return
             }
             try recorder.acknowledgePersistence()
+            WKInterfaceDevice.current().play(.success)
             isRecording = false
             voiceLevel = 0
             let reason = expectedReason ?? recovery.terminationReason
@@ -406,185 +374,364 @@ struct WatchCaptureView: View {
             transferStatus = .failed
             transferFailureMessage = "iPhone handoff failed. Retry when devices are nearby."
             store.lastErrorMessage = transferFailureMessage
+            WKInterfaceDevice.current().play(.failure)
             IdeaForgeLog.sync.error("watchOS recording transfer failed")
         }
     }
 }
 
-private struct WatchCaptureHero: View {
+private extension WatchCaptureRelayState {
+    var title: String {
+        switch self {
+        case .ready: "Ready on Watch"
+        case .recording: "Recording locally"
+        case .saved: "Saved on Watch"
+        case .queued: "Waiting for iPhone"
+        case .received: "Received on iPhone"
+        case .failed: "Kept on Watch"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .ready: "Works without iPhone"
+        case .recording: "Audio remains local"
+        case .saved: "Durable local copy"
+        case .queued: "Safe to retry later"
+        case .received: "Import acknowledged"
+        case .failed: "Send needs attention"
+        }
+    }
+
+    var tint: Color {
+        switch self {
+        case .ready: .forgeEmber
+        case .recording: .red
+        case .saved: .mint
+        case .queued: .yellow
+        case .received: .green
+        case .failed: .orange
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .ready: "mic"
+        case .recording: "waveform"
+        case .saved: "checkmark"
+        case .queued: "arrow.right"
+        case .received: "iphone"
+        case .failed: "exclamationmark"
+        }
+    }
+}
+
+private struct ForgeRelayBackdrop: View {
+    var tint: Color
+
+    var body: some View {
+        ZStack {
+            Color.forgeAubergine
+            LinearGradient(
+                colors: [tint.opacity(0.18), Color.forgeMagenta.opacity(0.07), .black],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+        }
+        .ignoresSafeArea()
+        .allowsHitTesting(false)
+    }
+}
+
+private struct ForgeRelayHeader: View {
+    var pendingCount: Int
+    var isRecording: Bool
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "sparkle")
+                .font(.system(size: 8, weight: .bold, design: .monospaced))
+                .foregroundStyle(Color.forgeSpark)
+            Text("IDEAFORGE")
+                .font(.caption2.monospaced().weight(.bold))
+                .tracking(0.8)
+            Spacer(minLength: 4)
+            if isRecording {
+                Text("LIVE")
+                    .foregroundStyle(.red)
+            } else if pendingCount > 0 {
+                Text("\(pendingCount) WAITING")
+                    .foregroundStyle(.yellow)
+            } else {
+                Text("LOCAL READY")
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .font(.system(size: 9, weight: .semibold, design: .monospaced))
+        .lineLimit(1)
+        .minimumScaleFactor(0.72)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(isRecording ? "IdeaForge, recording live" : pendingCount > 0 ? "IdeaForge, \(pendingCount) waiting for iPhone" : "IdeaForge, ready for local capture")
+    }
+}
+
+private struct ForgeCaptureSurface: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     var title: String
     var detail: String
     var tint: Color
     var isRecording: Bool
     var audioLevel: Double
-    var queuedCount: Int
-    var questionCount: Int
     var actionLabel: String
     var onToggleRecording: () -> Void
 
     var body: some View {
-        VStack(spacing: 10) {
-            Button {
-                onToggleRecording()
-            } label: {
-                WatchLiveRing(tint: tint, isActive: isRecording, audioLevel: audioLevel)
-                    .frame(width: 108, height: 108)
-            }
-            .buttonStyle(.plain)
-            .accessibilityIdentifier("watch.capture.record")
-            .accessibilityLabel(actionLabel)
-            .accessibilityHint(isRecording ? "Stops recording and queues it for iPhone handoff" : "Starts offline recording on Apple Watch")
+        Button(action: onToggleRecording) {
+            HStack(spacing: 10) {
+                VStack(alignment: .leading, spacing: 4) {
+                    if !dynamicTypeSize.isAccessibilitySize {
+                        Text(isRecording ? "CAPTURING" : "VOICE CAPTURE")
+                            .font(.system(size: 8, weight: .bold, design: .monospaced))
+                            .tracking(0.7)
+                            .foregroundStyle(tint)
+                    }
+                    Text(title)
+                        .font((dynamicTypeSize.isAccessibilitySize ? Font.body : .subheadline).weight(.semibold))
+                        .foregroundStyle(.primary)
+                        .lineLimit(dynamicTypeSize.isAccessibilitySize ? 2 : 1)
+                        .minimumScaleFactor(0.75)
+                    Text(detail)
+                        .font(.system(size: 9, weight: .regular, design: .rounded))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if !dynamicTypeSize.isAccessibilitySize {
+                        ForgeSignalBars(
+                            tint: tint,
+                            isRecording: isRecording,
+                            audioLevel: audioLevel
+                        )
+                        .frame(height: 11)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
 
-            VStack(spacing: 3) {
-                Text(title)
-                    .font(.title3.weight(.semibold))
-                Text(detail)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-                    .fixedSize(horizontal: false, vertical: true)
+                ZStack {
+                    Circle()
+                        .strokeBorder(tint.opacity(0.28), lineWidth: 1)
+                        .frame(
+                            width: dynamicTypeSize.isAccessibilitySize ? 44 : 52,
+                            height: dynamicTypeSize.isAccessibilitySize ? 44 : 52
+                        )
+                    Circle()
+                        .fill(tint.gradient)
+                        .frame(
+                            width: dynamicTypeSize.isAccessibilitySize ? 38 : 44,
+                            height: dynamicTypeSize.isAccessibilitySize ? 38 : 44
+                        )
+                        .shadow(color: tint.opacity(isRecording ? 0.32 : 0.16), radius: isRecording ? 9 : 4)
+                    Image(systemName: isRecording ? "stop.fill" : "mic.fill")
+                        .font(.body.weight(.bold))
+                        .foregroundStyle(.black.opacity(0.84))
+                }
+                .scaleEffect(isRecording && !reduceMotion ? 1.03 : 1)
+                .animation(reduceMotion ? nil : .snappy(duration: 0.18), value: isRecording)
             }
-
-            HStack(spacing: 6) {
-                WatchMetricCapsule(title: "Queue", value: queuedCount, tint: .cyan)
-                WatchMetricCapsule(title: "Ask", value: questionCount, tint: .indigo)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .frame(minHeight: 72)
+            .background(
+                LinearGradient(
+                    colors: [.white.opacity(0.09), tint.opacity(0.09), .white.opacity(0.035)],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                ),
+                in: UnevenRoundedRectangle(
+                    topLeadingRadius: 20,
+                    bottomLeadingRadius: 9,
+                    bottomTrailingRadius: 20,
+                    topTrailingRadius: 9,
+                    style: .continuous
+                )
+            )
+            .overlay {
+                UnevenRoundedRectangle(
+                    topLeadingRadius: 20,
+                    bottomLeadingRadius: 9,
+                    bottomTrailingRadius: 20,
+                    topTrailingRadius: 9,
+                    style: .continuous
+                )
+                .strokeBorder(tint.opacity(0.24), lineWidth: 1)
             }
         }
-        .padding(.top, 4)
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("watch.capture.record")
+        .accessibilityLabel(actionLabel)
+        .accessibilityValue(isRecording ? "Recording locally" : "Ready")
+        .accessibilityHint(isRecording ? "Stops and saves the recording on Apple Watch" : "Starts an offline recording on Apple Watch")
     }
 }
 
-private struct WatchLiveRing: View {
+private struct ForgeSignalBars: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     var tint: Color
-    var isActive: Bool
-    var audioLevel: Double
-    @State private var phase = false
-
-    var body: some View {
-        let active = isActive && !reduceMotion
-        let level = CGFloat(min(max(audioLevel, 0), 1))
-        let reactiveScale = active ? 1 + level * 0.12 : 1
-        let reactiveGlow = active ? 0.16 + level * 0.30 : 0.12
-
-        ZStack {
-            Circle()
-                .fill(.radialGradient(
-                    colors: [
-                        tint.opacity(active ? reactiveGlow : 0.18),
-                        tint.opacity(0.08),
-                        .clear
-                    ],
-                    center: .center,
-                    startRadius: 8,
-                    endRadius: 58
-                ))
-
-            Circle()
-                .stroke(
-                    AngularGradient(
-                        colors: [
-                            tint.opacity(0.24),
-                            .white.opacity(active ? 0.82 : 0.30),
-                            tint.opacity(active ? 0.95 : 0.42),
-                            tint.opacity(0.24)
-                        ],
-                        center: .center
-                    ),
-                    lineWidth: active ? 4 + level * 4 : 3
-                )
-                .rotationEffect(.degrees(phase && active ? 360 : 0))
-
-            Circle()
-                .strokeBorder(tint.opacity(active ? 0.22 + level * 0.36 : 0.16), lineWidth: active ? 1.5 + level * 2 : 1)
-                .padding(12 - level * 3)
-
-            Image(systemName: isActive ? "waveform.circle.fill" : "mic.circle.fill")
-                .font(.system(size: 42 + level * 4, weight: .semibold))
-                .foregroundStyle(tint)
-                .symbolRenderingMode(.hierarchical)
-                .symbolEffect(.pulse, options: .repeating, isActive: active)
-
-            WatchSignalBars(tint: tint, isActive: active, audioLevel: audioLevel)
-                .frame(width: 54, height: 24)
-                .offset(y: 44)
-        }
-        .scaleEffect((active && phase ? 1.025 : 1) * reactiveScale)
-        .animation(reduceMotion ? nil : .easeInOut(duration: 1.4).repeatForever(autoreverses: true), value: phase)
-        .animation(reduceMotion ? nil : .interactiveSpring(response: 0.18, dampingFraction: 0.72), value: audioLevel)
-        .onAppear {
-            updateAnimation(active: active)
-        }
-        .onChange(of: isActive) { _, newValue in
-            updateAnimation(active: newValue && !reduceMotion)
-        }
-        .onChange(of: reduceMotion) { _, newValue in
-            updateAnimation(active: isActive && !newValue)
-        }
-    }
-
-    private func updateAnimation(active: Bool) {
-        guard active else {
-            phase = false
-            return
-        }
-        withAnimation(.linear(duration: 3.4).repeatForever(autoreverses: false)) {
-            phase = true
-        }
-    }
-}
-
-private struct WatchSignalBars: View {
-    var tint: Color
-    var isActive: Bool
+    var isRecording: Bool
     var audioLevel: Double
 
     var body: some View {
-        HStack(alignment: .bottom, spacing: 3) {
-            ForEach(0..<5, id: \.self) { index in
-                RoundedRectangle(cornerRadius: 2, style: .continuous)
-                    .fill(tint.gradient)
-                    .frame(width: 5, height: height(for: index))
-                    .opacity(isActive ? 0.92 : 0.45)
+        HStack(alignment: .center, spacing: 3) {
+            ForEach(0..<9, id: \.self) { index in
+                Capsule()
+                    .fill(tint.opacity(isRecording ? 0.9 : 0.34))
+                    .frame(width: 3, height: barHeight(index))
             }
+            Spacer(minLength: 0)
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 5)
-        .background(.thinMaterial, in: Capsule())
-        .overlay {
-            Capsule().strokeBorder(tint.opacity(isActive ? 0.32 : 0.18))
-        }
+        .animation(reduceMotion ? nil : .linear(duration: 0.08), value: audioLevel)
+        .accessibilityHidden(true)
     }
 
-    private func height(for index: Int) -> CGFloat {
+    private func barHeight(_ index: Int) -> CGFloat {
+        guard isRecording else { return index == 4 ? 5 : 2 }
         let level = CGFloat(min(max(audioLevel, 0), 1))
-        let gainPattern: [CGFloat] = [8, 15, 20, 12, 17]
-        let activePattern: [CGFloat] = [9, 16, 22, 14, 19]
-        let idlePattern: [CGFloat] = [8, 11, 14, 10, 12]
-        guard isActive else { return idlePattern[index] }
-        return activePattern[index] + gainPattern[index] * level
+        let weights: [CGFloat] = [0.32, 0.48, 0.68, 0.86, 1, 0.82, 0.62, 0.44, 0.28]
+        return 3 + level * 17 * weights[index]
     }
 }
 
-private struct WatchMetricCapsule: View {
-    var title: String
-    var value: Int
-    var tint: Color
+private struct ForgeRelayTrack: View {
+    var state: WatchCaptureRelayState
+    var pendingCount: Int
+
+    private var reachesQueue: Bool {
+        state == .queued || state == .received || state == .failed
+    }
+
+    private var reachesPhone: Bool {
+        state == .received
+    }
 
     var body: some View {
-        HStack(spacing: 4) {
-            Text(title)
-                .font(.caption2.weight(.medium))
-            Text("\(value)")
-                .font(.caption2.monospacedDigit().weight(.semibold))
+        VStack(spacing: 4) {
+            HStack(spacing: 6) {
+                relayNode(symbol: "applewatch", label: "WATCH", resolved: state != .ready)
+                relayLine(active: reachesQueue)
+                relayNode(symbol: state == .failed ? "exclamationmark" : "arrow.up", label: "RELAY", resolved: reachesQueue)
+                relayLine(active: reachesPhone)
+                relayNode(symbol: "iphone", label: "IPHONE", resolved: reachesPhone)
+            }
+
+            HStack(spacing: 4) {
+                Image(systemName: state.symbol)
+                Text(state.title)
+                if pendingCount > 1 && state == .queued {
+                    Text("· \(pendingCount) clips")
+                }
+                Spacer(minLength: 0)
+            }
+            .font(.system(size: 8, weight: .semibold, design: .rounded))
+            .foregroundStyle(state.tint)
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 5)
-        .background(tint.opacity(value > 0 ? 0.20 : 0.10), in: Capsule())
-        .overlay {
-            Capsule().strokeBorder(tint.opacity(value > 0 ? 0.30 : 0.16))
+        .background(.black.opacity(0.32), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+        .accessibilityElement(children: .ignore)
+        .accessibilityIdentifier("watch.capture.relay")
+        .accessibilityLabel("Capture relay")
+        .accessibilityValue("\(state.title). \(state.detail)")
+    }
+
+    private func relayNode(symbol: String, label: String, resolved: Bool) -> some View {
+        Image(systemName: symbol)
+            .font(.caption2.weight(.bold))
+            .frame(width: 18, height: 18)
+            .background((resolved ? state.tint : Color.white.opacity(0.08)), in: Circle())
+            .foregroundStyle(resolved ? .black : .secondary)
+            .accessibilityLabel(label)
+    }
+
+    private func relayLine(active: Bool) -> some View {
+        Capsule()
+            .fill(active ? state.tint : Color.white.opacity(0.12))
+            .frame(maxWidth: .infinity, minHeight: 2, maxHeight: 2)
+    }
+}
+
+private struct WatchCaptureDetails: View {
+    var recordingCount: Int
+    var pendingCount: Int
+    var recordings: [WatchRecordingListItem]
+    @Binding var selectedProjectID: String
+    @Binding var selectedTag: IdeaTag
+    var projects: [IdeaProject]
+    var newIdeaTargetID: String
+    var isRecording: Bool
+    var transferState: WatchCaptureRelayState
+    var transferFailureMessage: String?
+    var canRetryTransfer: Bool
+    var questions: [Question]
+    var onRetryTransfer: () -> Void
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Label(transferState.title, systemImage: transferState.symbol)
+                        .font(.headline)
+                        .foregroundStyle(transferState.tint)
+                    Text(transferFailureMessage ?? transferState.detail)
+                        .font(.caption2)
+                        .foregroundStyle(transferFailureMessage == nil ? Color.secondary : Color.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityIdentifier(transferFailureMessage == nil ? "watch.capture.transferStatus" : "watch.capture.transferFailure")
+                    if canRetryTransfer {
+                        Button(action: onRetryTransfer) {
+                            Label("Retry Send", systemImage: "arrow.clockwise")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.orange)
+                        .accessibilityIdentifier("watch.capture.retryTransfer")
+                    }
+                }
+
+                Divider()
+
+                Text("NEXT CAPTURE")
+                    .font(.caption2.monospaced().weight(.bold))
+                    .foregroundStyle(.secondary)
+                WatchCaptureTargetPicker(
+                    selection: $selectedProjectID,
+                    projects: projects,
+                    newIdeaTargetID: newIdeaTargetID,
+                    isDisabled: isRecording
+                )
+                WatchIdeaTagPicker(selectedTag: $selectedTag)
+
+                WatchRecordingsPanel(
+                    recordingCount: recordingCount,
+                    pendingCount: pendingCount,
+                    recordings: recordings,
+                    selectedProjectID: $selectedProjectID,
+                    newIdeaTargetID: newIdeaTargetID,
+                    isRecording: isRecording
+                )
+
+                if !questions.isEmpty {
+                    Text("QUESTIONS")
+                        .font(.caption2.monospaced().weight(.bold))
+                        .foregroundStyle(.secondary)
+                    ForEach(questions) { question in
+                        WatchQuestionRow(question: question)
+                    }
+                }
+            }
+            .padding(.horizontal, 4)
+            .padding(.bottom, 12)
         }
-        .foregroundStyle(value > 0 ? tint : .secondary)
+        .navigationTitle("Saved & Setup")
     }
 }
 
@@ -624,7 +771,7 @@ private struct WatchCaptureTargetPicker: View {
                         detail: "append",
                         symbol: "plus.bubble",
                         isSelected: selection == project.id,
-                        tint: .cyan
+                        tint: .forgeEmber
                     )
                 }
                 .buttonStyle(.plain)
@@ -678,11 +825,11 @@ private struct WatchIdeaTagPicker: View {
     private func tint(for tag: IdeaTag) -> Color {
         switch tag {
         case .appIdea: .yellow
-        case .feature: .cyan
+        case .feature: .forgeEmber
         case .bug: .red
         case .business: .green
-        case .research: .indigo
-        case .random: .orange
+        case .research: .forgeMagenta
+        case .random: .forgeCoral
         }
     }
 }
@@ -774,13 +921,13 @@ private struct WatchRecordingsPanel: View {
     }
 
     var body: some View {
-        WatchGlassPanel(tint: .cyan, isLive: hasPending) {
+        WatchGlassPanel(tint: .forgeEmber, isLive: hasPending) {
             VStack(alignment: .leading, spacing: 9) {
                 WatchPanelHeader(
                     title: "Saved on Watch",
                     detail: "\(recordingCount) clip\(recordingCount == 1 ? "" : "s")",
                     symbol: "waveform.badge.plus",
-                    tint: .cyan,
+                    tint: .forgeEmber,
                     isLive: hasPending
                 )
 
@@ -825,15 +972,11 @@ private struct WatchRecordingsPanel: View {
 }
 
 private struct WatchGlassPanel<Content: View>: View {
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     var tint: Color
     var isLive: Bool
     @ViewBuilder var content: () -> Content
-    @State private var glow = false
 
     var body: some View {
-        let active = isLive && !reduceMotion && glow
-
         content()
             .padding(12)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -855,104 +998,7 @@ private struct WatchGlassPanel<Content: View>: View {
                 RoundedRectangle(cornerRadius: 18, style: .continuous)
                     .strokeBorder(tint.opacity(isLive ? 0.28 : 0.16), lineWidth: 1)
             }
-            .overlay {
-                WatchConstellationTrace(tint: tint, isActive: isLive)
-            }
-            .shadow(color: tint.opacity(active ? 0.24 : 0.08), radius: active ? 14 : 8, y: 5)
-            .scaleEffect(active ? 1.01 : 1)
-            .animation(reduceMotion ? nil : .easeInOut(duration: 1.8), value: glow)
-            .onAppear {
-                updateGlow(active: isLive && !reduceMotion)
-            }
-            .onChange(of: isLive) { _, newValue in
-                updateGlow(active: newValue && !reduceMotion)
-            }
-            .onChange(of: reduceMotion) { _, newValue in
-                updateGlow(active: isLive && !newValue)
-            }
-    }
-
-    private func updateGlow(active: Bool) {
-        guard active else {
-            glow = false
-            return
-        }
-        withAnimation(.easeInOut(duration: 1.8).repeatForever(autoreverses: true)) {
-            glow = true
-        }
-    }
-}
-
-private struct WatchConstellationTrace: View {
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    var tint: Color
-    var isActive: Bool
-    @State private var phase = false
-
-    var body: some View {
-        let active = isActive && !reduceMotion
-
-        GeometryReader { proxy in
-            let width = max(proxy.size.width, 1)
-            let height = max(proxy.size.height, 1)
-
-            ZStack(alignment: .topLeading) {
-                ForEach(0..<2, id: \.self) { index in
-                    Capsule()
-                        .fill(tint.opacity(active ? 0.28 : 0.10))
-                        .frame(width: width * (0.24 + CGFloat(index) * 0.08), height: 1.5)
-                        .rotationEffect(.degrees(index == 0 ? -9 : 10))
-                        .offset(
-                            x: width * (0.56 + CGFloat(index) * 0.18),
-                            y: height * (0.24 + CGFloat(index) * 0.34) + (phase && active ? 4 : -2)
-                        )
-                        .opacity(active ? 0.70 : 0.22)
-                }
-
-                ForEach(0..<4, id: \.self) { index in
-                    RoundedRectangle(cornerRadius: 2, style: .continuous)
-                        .fill(tint.opacity(active ? 0.50 : 0.16))
-                        .frame(width: 4, height: 4)
-                        .offset(
-                            x: width * xPosition(for: index),
-                            y: height * yPosition(for: index) + (phase && active ? CGFloat(index % 2) * -2 : 0)
-                        )
-                        .opacity(active ? 0.82 : 0.30)
-                }
-            }
-            .frame(width: width, height: height)
-        }
-        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .blendMode(.screen)
-        .allowsHitTesting(false)
-        .accessibilityHidden(true)
-        .onAppear {
-            updateAnimation(active: active)
-        }
-        .onChange(of: isActive) { _, newValue in
-            updateAnimation(active: newValue && !reduceMotion)
-        }
-        .onChange(of: reduceMotion) { _, newValue in
-            updateAnimation(active: isActive && !newValue)
-        }
-    }
-
-    private func xPosition(for index: Int) -> CGFloat {
-        [0.58, 0.76, 0.86, 0.68][index]
-    }
-
-    private func yPosition(for index: Int) -> CGFloat {
-        [0.24, 0.34, 0.58, 0.70][index]
-    }
-
-    private func updateAnimation(active: Bool) {
-        guard active else {
-            phase = false
-            return
-        }
-        withAnimation(.easeInOut(duration: 3.6).repeatForever(autoreverses: true)) {
-            phase = true
-        }
+            .shadow(color: tint.opacity(isLive ? 0.12 : 0.06), radius: 8, y: 4)
     }
 }
 
@@ -969,7 +1015,6 @@ private struct WatchPanelHeader: View {
                 .font(.headline)
                 .foregroundStyle(tint)
                 .symbolRenderingMode(.hierarchical)
-                .symbolEffect(.pulse, options: .repeating, isActive: isLive)
                 .frame(width: 24, height: 24)
 
             VStack(alignment: .leading, spacing: 2) {
@@ -1036,7 +1081,7 @@ private struct WatchSavedRecordingRow: View {
             }
             .font(.caption2.weight(.semibold))
             .buttonStyle(.bordered)
-            .tint(isSelectedForAppend ? .green : .cyan)
+            .tint(isSelectedForAppend ? .green : .forgeEmber)
             .disabled(isRecording)
             .accessibilityIdentifier("watch.recordings.append.\(item.project.id)")
             .accessibilityHint("Append the next Watch recording to \(item.project.title)")
@@ -1069,77 +1114,6 @@ private struct WatchQuestionRow: View {
     }
 }
 
-private struct WatchAmbientBackdrop: View {
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    var tint: Color
-    var isActive: Bool
-    @State private var phase = false
-
-    var body: some View {
-        LinearGradient(
-            colors: [
-                tint.opacity(phase && isActive && !reduceMotion ? 0.24 : 0.12),
-                Color.indigo.opacity(phase && isActive && !reduceMotion ? 0.16 : 0.08),
-                Color.orange.opacity(0.08),
-                .clear
-            ],
-            startPoint: phase && isActive && !reduceMotion ? .topLeading : .bottomLeading,
-            endPoint: phase && isActive && !reduceMotion ? .bottomTrailing : .topTrailing
-        )
-        .ignoresSafeArea()
-        .allowsHitTesting(false)
-        .accessibilityHidden(true)
-        .onAppear {
-            updateAnimation(active: isActive && !reduceMotion)
-        }
-        .onChange(of: isActive) { _, newValue in
-            updateAnimation(active: newValue && !reduceMotion)
-        }
-        .onChange(of: reduceMotion) { _, newValue in
-            updateAnimation(active: isActive && !newValue)
-        }
-    }
-
-    private func updateAnimation(active: Bool) {
-        guard active else {
-            phase = false
-            return
-        }
-        withAnimation(.easeInOut(duration: 7).repeatForever(autoreverses: true)) {
-            phase = true
-        }
-    }
-}
-
-private extension RecordingTransferStatus {
-    var watchActionLabel: String {
-        switch self {
-        case .unavailable: "Ready offline"
-        case .queuedForTransfer: "Sending to iPhone"
-        case .received: "Imported on iPhone"
-        case .failed: "Retry needed"
-        }
-    }
-
-    var watchTint: Color {
-        switch self {
-        case .unavailable: .orange
-        case .queuedForTransfer: .green
-        case .received: .cyan
-        case .failed: .red
-        }
-    }
-
-    var watchSymbol: String {
-        switch self {
-        case .unavailable: "icloud.slash"
-        case .queuedForTransfer: "checkmark.icloud"
-        case .received: "iphone.gen3"
-        case .failed: "exclamationmark.icloud"
-        }
-    }
-}
-
 private extension SyncStatus {
     var watchStatusLabel: String {
         switch self {
@@ -1157,7 +1131,7 @@ private extension SyncStatus {
         case .pending: .yellow
         case .transferredToIPhone, .uploaded, .ready: .green
         case .failed: .red
-        case .transcribing: .cyan
+        case .transcribing: .forgeMagenta
         }
     }
 

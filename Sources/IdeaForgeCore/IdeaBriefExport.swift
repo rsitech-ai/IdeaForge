@@ -46,6 +46,11 @@ public enum IdeaBriefExporter {
                 "## Summary",
                 project.summary,
                 "",
+                "## Transcript",
+                project.transcript.cleanText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    ? "Transcript is not available yet."
+                    : project.transcript.cleanText,
+                "",
                 questionsSection(for: project),
                 assumptionsSection(for: project),
                 validationSection(for: project),

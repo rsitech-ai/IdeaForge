@@ -199,9 +199,13 @@ enum RecordingTransferReachabilityPolicy {
     static func isReachable(
         sessionIsActivated: Bool,
         companionIsAvailable: Bool,
-        sessionIsReachable: Bool
+        sessionIsReachable _: Bool
     ) -> Bool {
-        sessionIsActivated && companionIsAvailable && sessionIsReachable
+        // `WCSession.isReachable` only describes live messaging while the
+        // counterpart app is active. IdeaForge uses queued file and user-info
+        // transfers, so the durable background link remains available while
+        // the session is activated and the paired companion app is installed.
+        sessionIsActivated && companionIsAvailable
     }
 }
 
@@ -216,8 +220,10 @@ public enum RecordingTransferError: Error, Equatable {
 public protocol RecordingTransferService {
     @MainActor func activate()
     @MainActor func transfer(recording: Recording) throws -> RecordingTransferReceipt
+    @MainActor func publish(_ projection: WatchEnrichmentProjection) throws
     @MainActor func setTransferCompletionHandler(_ handler: RecordingTransferCompletionHandler?)
     @MainActor func setReachabilityHandler(_ handler: RecordingTransferReachabilityHandler?)
+    @MainActor func setEnrichmentProjectionHandler(_ handler: WatchEnrichmentProjectionHandler?)
 }
 
 extension RecordingTransferService {
@@ -226,6 +232,14 @@ extension RecordingTransferService {
 
     @MainActor
     public func setReachabilityHandler(_ handler: RecordingTransferReachabilityHandler?) {}
+
+    @MainActor
+    public func setEnrichmentProjectionHandler(_ handler: WatchEnrichmentProjectionHandler?) {}
+
+    @MainActor
+    public func publish(_ projection: WatchEnrichmentProjection) throws {
+        throw RecordingTransferError.unsupportedPlatform
+    }
 }
 
 public typealias RecordingTransferReceiveHandler = @MainActor @Sendable (URL, RecordingTransferMetadata) async -> RecordingTransferImportResult
@@ -234,6 +248,7 @@ public typealias RecordingTransferReceiveHandler = @MainActor @Sendable (URL, Re
 /// `imported` is true only after the recording is durable in the receiving workspace.
 public typealias RecordingTransferCompletionHandler = @MainActor @Sendable (_ recordingID: String, _ imported: Bool) -> Void
 public typealias RecordingTransferReachabilityHandler = @MainActor @Sendable (_ isReachable: Bool) -> Void
+public typealias WatchEnrichmentProjectionHandler = @MainActor @Sendable (WatchEnrichmentProjection) -> Void
 
 public struct UnavailableRecordingTransferService: RecordingTransferService {
     public init() {}
@@ -317,6 +332,8 @@ public final class WatchConnectivityRecordingTransferService: NSObject, Recordin
     private let receiveHandler: RecordingTransferReceiveHandler?
     @MainActor private var transferCompletionHandler: RecordingTransferCompletionHandler?
     @MainActor private var reachabilityHandler: RecordingTransferReachabilityHandler?
+    @MainActor private var enrichmentProjectionHandler: WatchEnrichmentProjectionHandler?
+    @MainActor private var pendingEnrichmentProjection: WatchEnrichmentProjection?
     @MainActor private var pendingAcknowledgements: [String: RecordingTransferImportResult] = [:]
     @MainActor public private(set) var receivedTransfers: [RecordingTransferMetadata] = []
 
@@ -347,6 +364,34 @@ public final class WatchConnectivityRecordingTransferService: NSObject, Recordin
         if let session {
             publishReachability(for: session)
         }
+    }
+
+    @MainActor
+    public func setEnrichmentProjectionHandler(_ handler: WatchEnrichmentProjectionHandler?) {
+        enrichmentProjectionHandler = handler
+        guard let session,
+              let projection = WatchEnrichmentProjection(
+                  applicationContext: session.receivedApplicationContext
+              ) else {
+            return
+        }
+        handler?(projection)
+    }
+
+    @MainActor
+    public func publish(_ projection: WatchEnrichmentProjection) throws {
+        guard let session else {
+            throw RecordingTransferError.unsupportedPlatform
+        }
+        guard session.activationState == .activated else {
+            pendingEnrichmentProjection = projection
+            session.activate()
+            IdeaForgeLog.sync.info("Watch title and processing projection held until connectivity session activates")
+            return
+        }
+        try session.updateApplicationContext(projection.applicationContext)
+        pendingEnrichmentProjection = nil
+        IdeaForgeLog.sync.info("Watch title and processing projection updated; count: \(projection.items.count, privacy: .public)")
     }
 
     @MainActor
@@ -431,6 +476,21 @@ public final class WatchConnectivityRecordingTransferService: NSObject, Recordin
     }
 
     @MainActor
+    private func flushPendingEnrichmentProjection(on session: WCSession) {
+        guard session.activationState == .activated,
+              let projection = pendingEnrichmentProjection else {
+            return
+        }
+        do {
+            try session.updateApplicationContext(projection.applicationContext)
+            pendingEnrichmentProjection = nil
+            IdeaForgeLog.sync.info("Queued Watch title and processing projection published after activation")
+        } catch {
+            IdeaForgeLog.sync.error("Queued Watch title and processing projection could not be published")
+        }
+    }
+
+    @MainActor
     private func publishReachability(for session: WCSession) {
         #if os(iOS)
         let companionIsAvailable = session.isPaired && session.isWatchAppInstalled
@@ -461,6 +521,7 @@ extension WatchConnectivityRecordingTransferService: WCSessionDelegate {
         }
         Task { @MainActor [weak self] in
             self?.flushPendingAcknowledgements(on: session)
+            self?.flushPendingEnrichmentProjection(on: session)
             self?.publishReachability(for: session)
         }
     }
@@ -541,6 +602,19 @@ extension WatchConnectivityRecordingTransferService: WCSessionDelegate {
         let imported = RecordingTransferCompletionPolicy.importCompletion(for: acknowledgement.result)
         Task { @MainActor [weak self] in
             self?.transferCompletionHandler?(acknowledgement.recordingID, imported)
+        }
+    }
+
+    public nonisolated func session(
+        _ session: WCSession,
+        didReceiveApplicationContext applicationContext: [String: Any]
+    ) {
+        guard let projection = WatchEnrichmentProjection(applicationContext: applicationContext) else {
+            IdeaForgeLog.sync.warning("Ignored invalid Watch enrichment projection")
+            return
+        }
+        Task { @MainActor [weak self] in
+            self?.enrichmentProjectionHandler?(projection)
         }
     }
 
