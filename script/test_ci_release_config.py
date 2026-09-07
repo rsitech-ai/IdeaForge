@@ -36,6 +36,7 @@ class CIReleaseConfigurationTests(unittest.TestCase):
         self.assertIn("090ec29491aad50aec10631bf6e62253fed733c50f3aab0f5ffc86bc170bdbef", text)
         for command in (
             "swift test",
+            "python3 -m unittest discover -s Tests/LocalBackendTests",
             "test_audit_public_source.py",
             "test_audit_public_git_metadata.py",
             "test_create_public_source_snapshot.py",

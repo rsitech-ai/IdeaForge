@@ -22,6 +22,64 @@ public protocol LocalSpeechAudioFileChecking: Sendable {
     func fileExists(atPath path: String) -> Bool
 }
 
+struct LocalEnrichmentRuntimePolicy: Equatable, Sendable {
+    private let arguments: Set<String>
+
+    init(arguments: [String]) {
+        self.arguments = Set(arguments)
+    }
+
+    private var isUITesting: Bool {
+        arguments.contains("-uiTesting")
+    }
+
+    var usesDeterministicTranscription: Bool {
+        isUITesting && arguments.contains("-uiTestingLocalEnrichment")
+    }
+
+    var usesUnavailableFoundationFixture: Bool {
+        isUITesting && arguments.contains("-uiTestingFoundationUnavailable")
+    }
+
+    var usesMixedOutcomeFixture: Bool {
+        isUITesting && arguments.contains("-uiTestingMixedEnrichmentOutcome")
+    }
+}
+
+@MainActor
+final class LocalEnrichmentStatusGate {
+    typealias Revision = UInt64
+    private var revision: Revision = 0
+
+    func beginAvailabilityCheck() -> Revision {
+        revision
+    }
+
+    func invalidateForEnrichmentOutcome() {
+        revision &+= 1
+    }
+
+    func canApplyAvailability(from candidateRevision: Revision) -> Bool {
+        candidateRevision == revision
+    }
+}
+
+protocol LocalSpeechRecognitionRequestConfiguring: AnyObject {
+    var requiresOnDeviceRecognition: Bool { get set }
+}
+
+enum OnDeviceSpeechRecognitionRequestPolicy {
+    static func prepare(
+        request: any LocalSpeechRecognitionRequestConfiguring,
+        supportsOnDeviceRecognition: Bool
+    ) throws {
+        guard supportsOnDeviceRecognition else {
+            throw LocalSpeechTranscriptionError.onDeviceRecognitionUnavailable
+        }
+        request.requiresOnDeviceRecognition = true
+    }
+}
+
 public struct SystemSpeechAudioFileChecker: LocalSpeechAudioFileChecking {
     public init() {}
 
@@ -35,6 +93,7 @@ public enum LocalSpeechTranscriptionError: Error, Equatable, UserFacingIdeaForge
     case audioFileUnavailable
     case authorizationDenied(LocalSpeechAuthorizationStatus)
     case recognizerUnavailable
+    case onDeviceRecognitionUnavailable
     case recognitionTimedOut
     case emptyRecognition
 
@@ -52,6 +111,8 @@ public enum LocalSpeechTranscriptionError: Error, Equatable, UserFacingIdeaForge
             return "Speech recognition could not start."
         case .recognizerUnavailable:
             return "Speech recognition is unavailable for this language or device right now."
+        case .onDeviceRecognitionUnavailable:
+            return "On-device speech recognition is unavailable for this language or device. No audio was sent to a speech service."
         case .recognitionTimedOut:
             return "Speech recognition took too long. Try again with a shorter recording or use cloud transcription."
         case .emptyRecognition:
@@ -146,6 +207,8 @@ public struct LocalSpeechTranscriptionService: TranscriptionService {
 }
 
 #if canImport(Speech) && !os(watchOS)
+extension SFSpeechURLRecognitionRequest: LocalSpeechRecognitionRequestConfiguring {}
+
 public struct SystemSpeechAuthorizationClient: LocalSpeechAuthorizationChecking {
     public init() {}
 
@@ -180,7 +243,10 @@ public struct SystemSpeechAudioTranscriber: LocalSpeechAudioTranscribing {
 
         let request = SFSpeechURLRecognitionRequest(url: url)
         request.shouldReportPartialResults = false
-        request.requiresOnDeviceRecognition = false
+        try OnDeviceSpeechRecognitionRequestPolicy.prepare(
+            request: request,
+            supportsOnDeviceRecognition: recognizer.supportsOnDeviceRecognition
+        )
 
         let holder = SpeechRecognitionContinuationHolder()
         return try await withTaskCancellationHandler {

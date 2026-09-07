@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import CryptoKit
 
 public enum IdeaStatus: String, Codable, CaseIterable, Identifiable, Sendable {
     case inbox
@@ -320,6 +321,15 @@ public struct IdeaScore: Codable, Hashable, Sendable {
     }
 }
 
+/// Evidence for the last generated title, not a claim about later manual edits.
+public struct TitleGenerationProvenance: Codable, Hashable, Sendable {
+    public var providerIdentifier: String
+    public var generatedTitle: String
+    public var recordingID: String
+    public var transcriptSHA256: String
+    public var generatedAt: Date
+}
+
 public struct IdeaProject: Identifiable, Codable, Hashable, Sendable {
     public var id: String
     public var title: String
@@ -338,6 +348,7 @@ public struct IdeaProject: Identifiable, Codable, Hashable, Sendable {
     public var validationExperiments: [ValidationExperiment]
     public var codexTasks: [CodexTask]
     public var workflowRuns: [WorkflowRun]
+    public var titleProvenance: TitleGenerationProvenance?
 
     public init(
         id: String,
@@ -356,7 +367,8 @@ public struct IdeaProject: Identifiable, Codable, Hashable, Sendable {
         assumptions: [Assumption],
         validationExperiments: [ValidationExperiment],
         codexTasks: [CodexTask],
-        workflowRuns: [WorkflowRun] = []
+        workflowRuns: [WorkflowRun] = [],
+        titleProvenance: TitleGenerationProvenance? = nil
     ) {
         self.id = id
         self.title = title
@@ -375,6 +387,7 @@ public struct IdeaProject: Identifiable, Codable, Hashable, Sendable {
         self.validationExperiments = validationExperiments
         self.codexTasks = codexTasks
         self.workflowRuns = workflowRuns
+        self.titleProvenance = titleProvenance
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -395,6 +408,7 @@ public struct IdeaProject: Identifiable, Codable, Hashable, Sendable {
         case validationExperiments
         case codexTasks
         case workflowRuns
+        case titleProvenance
     }
 
     public init(from decoder: Decoder) throws {
@@ -416,6 +430,7 @@ public struct IdeaProject: Identifiable, Codable, Hashable, Sendable {
         validationExperiments = try container.decode([ValidationExperiment].self, forKey: .validationExperiments)
         codexTasks = try container.decode([CodexTask].self, forKey: .codexTasks)
         workflowRuns = try container.decodeIfPresent([WorkflowRun].self, forKey: .workflowRuns) ?? []
+        titleProvenance = try container.decodeIfPresent(TitleGenerationProvenance.self, forKey: .titleProvenance)
     }
 }
 
@@ -500,11 +515,46 @@ public struct Transcript: Codable, Hashable, Sendable {
     public var cleanText: String
     public var segments: [TranscriptSegment]
     public var unclearFragments: [String]
+    public var unclearFragmentsByRecordingID: [String: [String]]
 
-    public init(cleanText: String, segments: [TranscriptSegment], unclearFragments: [String]) {
+    public init(
+        cleanText: String,
+        segments: [TranscriptSegment],
+        unclearFragments: [String],
+        unclearFragmentsByRecordingID: [String: [String]] = [:]
+    ) {
         self.cleanText = cleanText
         self.segments = segments
         self.unclearFragments = unclearFragments
+        self.unclearFragmentsByRecordingID = unclearFragmentsByRecordingID
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case cleanText
+        case segments
+        case unclearFragments
+        case unclearFragmentsByRecordingID
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        cleanText = try container.decode(String.self, forKey: .cleanText)
+        segments = try container.decode([TranscriptSegment].self, forKey: .segments)
+        unclearFragments = try container.decode([String].self, forKey: .unclearFragments)
+        unclearFragmentsByRecordingID = try container.decodeIfPresent(
+            [String: [String]].self,
+            forKey: .unclearFragmentsByRecordingID
+        ) ?? [:]
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(cleanText, forKey: .cleanText)
+        try container.encode(segments, forKey: .segments)
+        try container.encode(unclearFragments, forKey: .unclearFragments)
+        if !unclearFragmentsByRecordingID.isEmpty {
+            try container.encode(unclearFragmentsByRecordingID, forKey: .unclearFragmentsByRecordingID)
+        }
     }
 }
 
@@ -1220,6 +1270,41 @@ public struct AccountUploadDiagnosticsSnapshot: Equatable, Sendable {
     }
 }
 
+private enum TitleGenerationOutcome {
+    case generated(String, providerIdentifier: String, transcriptSHA256: String)
+    case preserved
+    case unavailable(IdeaTitleGenerationAvailability)
+    case failed
+
+    var generatedTitle: String? {
+        guard case .generated(let title, _, _) = self else { return nil }
+        return title
+    }
+}
+
+private struct RecordingProcessingCheckpoint {
+    var recording: Recording
+    var transcript: Transcript
+    var transcriptionHint: String
+    var clearsExistingFailure: Bool
+}
+
+private extension AIProcessingSummary {
+    mutating func record(_ outcome: TitleGenerationOutcome) {
+        switch outcome {
+        case .generated:
+            titleGeneratedCount += 1
+        case .preserved:
+            titlePreservedCount += 1
+        case .unavailable(let availability):
+            titleUnavailableCount += 1
+            titleUnavailableReasons[availability, default: 0] += 1
+        case .failed:
+            titleFailedCount += 1
+        }
+    }
+}
+
 @Observable
 public final class IdeaForgeStore {
     public var projects: [IdeaProject]
@@ -1317,7 +1402,13 @@ public final class IdeaForgeStore {
         let store = IdeaForgeStore(state: state, repository: repository)
         store.lastErrorMessage = loadErrorMessage
         store.workspaceLoadFailed = loadErrorMessage != nil
+        if loadErrorMessage == nil {
+            store.recoverRelocatedTransferredRecordingAudio(
+                inboxDirectory: TransferredRecordingImporter.applicationSupportInboxDirectory()
+            )
+        }
         store.recoverInterruptedUploads()
+        store.recoverInterruptedTranscriptions()
         return store
     }
 
@@ -1346,7 +1437,7 @@ public final class IdeaForgeStore {
         )
     }
 
-    private func restoreLiveState(_ state: WorkspaceState) {
+    func restoreLiveState(_ state: WorkspaceState) {
         projects = state.projects
         workflowTemplates = state.workflowTemplates
         uploadJobs = state.uploadJobs
@@ -2484,36 +2575,51 @@ public final class IdeaForgeStore {
         IdeaForgeLog.workflow.info("Processing uploaded recordings for transcription; candidate count: \(candidates.count, privacy: .public)")
         for recording in candidates {
             summary.attemptedCount += 1
-            let wasFailedCandidate = recording.syncStatus == .failed
-            updateRecording(recordingID: recording.id, event: .transcribing)
-            save(now: now)
+            guard let checkpoint = beginTranscription(recordingID: recording.id, now: now) else {
+                summary.failedCount += 1
+                continue
+            }
 
             do {
-                let hint = projects.first { $0.id == recording.ideaProjectID }?.summary ?? ""
                 let transcript = try await services.transcription.transcript(
                     for: recording,
-                    hint: hint
+                    hint: checkpoint.transcriptionHint
                 )
-                if wasFailedCandidate {
-                    syncHealth.failingItems = max(0, syncHealth.failingItems - 1)
+                let titleOutcome = await generatedTitleOutcome(
+                    for: transcript,
+                    recording: recording,
+                    titleGeneration: services.titleGeneration
+                )
+                guard let persistedTitleOutcome = apply(
+                    transcript: transcript,
+                    titleOutcome: titleOutcome,
+                    to: recording.ideaProjectID,
+                    checkpoint: checkpoint,
+                    now: now
+                ) else {
+                    summary.failedCount += 1
+                    continue
                 }
-                apply(transcript: transcript, to: recording.ideaProjectID, recordingID: recording.id, now: now)
                 summary.completedCount += 1
+                summary.record(persistedTitleOutcome)
             } catch {
                 let diagnostic = transcriptionFailureDiagnostic(for: error, failedAt: now)
-                updateRecording(recordingID: recording.id, event: .transcriptionFailed)
-                setProcessingDiagnostic(diagnostic, recordingID: recording.id, now: now)
-                if !wasFailedCandidate {
-                    syncHealth.failingItems += 1
-                }
-                save(now: now)
+                let applied = applyTranscriptionFailure(
+                    diagnostic,
+                    to: recording.ideaProjectID,
+                    checkpoint: checkpoint,
+                    now: now
+                )
                 summary.failedCount += 1
-                lastErrorMessage = diagnostic.message
-                IdeaForgeLog.workflow.error("Transcription failed for recording \(recording.id, privacy: .private); reason: \(diagnostic.message, privacy: .public)")
+                if applied {
+                    IdeaForgeLog.workflow.error("Transcription failed for recording \(recording.id, privacy: .private); reason: \(diagnostic.message, privacy: .public)")
+                } else {
+                    IdeaForgeLog.workflow.error("Transcription failure state was not applied for recording \(recording.id, privacy: .private)")
+                }
             }
         }
 
-        IdeaForgeLog.workflow.info("Transcription run completed; attempted: \(summary.attemptedCount, privacy: .public), completed: \(summary.completedCount, privacy: .public), failed: \(summary.failedCount, privacy: .public)")
+        IdeaForgeLog.workflow.info("Transcription run completed; attempted: \(summary.attemptedCount, privacy: .public), completed: \(summary.completedCount, privacy: .public), failed: \(summary.failedCount, privacy: .public), titles generated: \(summary.titleGeneratedCount, privacy: .public), preserved: \(summary.titlePreservedCount, privacy: .public), unavailable: \(summary.titleUnavailableCount, privacy: .public), title failures: \(summary.titleFailedCount, privacy: .public)")
         return summary
     }
 
@@ -2523,57 +2629,163 @@ public final class IdeaForgeStore {
         maxRecordingsPerRun: Int = 2,
         now: Date = Date()
     ) async -> AIProcessingSummary {
-        let candidates = projects
-            .flatMap(\.recordings)
-            .filter { recording in
-                guard recording.localFileStatus == .available,
-                      recording.localAudioPath?.isEmpty == false,
-                      recording.syncStatus != .ready,
-                      recording.syncStatus != .transcribing else {
-                    return false
-                }
-                if recording.syncStatus == .failed {
-                    return recording.processingDiagnostic?.isRetryable == true
-                }
-                return true
-            }
-            .prefix(maxRecordingsPerRun)
+        let candidates = localSpeechTranscriptionCandidates(maxRecordingsPerRun: maxRecordingsPerRun)
+
+        return await processLocalSpeechTranscriptionCandidates(
+            candidates,
+            services: services,
+            now: now
+        )
+    }
+
+    @MainActor
+    public func processLocalRecordingForSpeechTranscription(
+        recordingID: String,
+        services: IdeaForgeServices = .localSpeech,
+        now: Date = Date()
+    ) async -> AIProcessingSummary {
+        let candidates = localSpeechTranscriptionCandidates(maxRecordingsPerRun: Int.max)
+            .filter { $0.id == recordingID }
+        return await processLocalSpeechTranscriptionCandidates(
+            candidates,
+            services: services,
+            now: now
+        )
+    }
+
+    @MainActor
+    private func processLocalSpeechTranscriptionCandidates(
+        _ candidates: [Recording],
+        services: IdeaForgeServices,
+        now: Date
+    ) async -> AIProcessingSummary {
 
         var summary = AIProcessingSummary()
         IdeaForgeLog.workflow.info("Processing local recordings for speech transcription; candidate count: \(candidates.count, privacy: .public)")
         for recording in candidates {
             summary.attemptedCount += 1
-            let wasFailedCandidate = recording.syncStatus == .failed
-            updateRecording(recordingID: recording.id, event: .transcribing)
-            save(now: now)
+            guard let checkpoint = beginTranscription(recordingID: recording.id, now: now) else {
+                summary.failedCount += 1
+                continue
+            }
 
             do {
-                let hint = projects.first { $0.id == recording.ideaProjectID }?.summary ?? ""
                 let transcript = try await services.transcription.transcript(
                     for: recording,
-                    hint: hint
+                    hint: checkpoint.transcriptionHint
                 )
-                if wasFailedCandidate {
-                    syncHealth.failingItems = max(0, syncHealth.failingItems - 1)
+                let titleOutcome = await generatedTitleOutcome(
+                    for: transcript,
+                    recording: recording,
+                    titleGeneration: services.titleGeneration
+                )
+                guard let persistedTitleOutcome = apply(
+                    transcript: transcript,
+                    titleOutcome: titleOutcome,
+                    to: recording.ideaProjectID,
+                    checkpoint: checkpoint,
+                    now: now
+                ) else {
+                    summary.failedCount += 1
+                    continue
                 }
-                apply(transcript: transcript, to: recording.ideaProjectID, recordingID: recording.id, now: now)
                 summary.completedCount += 1
+                summary.record(persistedTitleOutcome)
             } catch {
                 let diagnostic = transcriptionFailureDiagnostic(for: error, failedAt: now)
-                updateRecording(recordingID: recording.id, event: .transcriptionFailed)
-                setProcessingDiagnostic(diagnostic, recordingID: recording.id, now: now)
-                if !wasFailedCandidate {
-                    syncHealth.failingItems += 1
-                }
-                save(now: now)
+                let applied = applyTranscriptionFailure(
+                    diagnostic,
+                    to: recording.ideaProjectID,
+                    checkpoint: checkpoint,
+                    now: now
+                )
                 summary.failedCount += 1
-                lastErrorMessage = diagnostic.message
-                IdeaForgeLog.workflow.error("Local speech transcription failed for recording \(recording.id, privacy: .private); reason: \(diagnostic.message, privacy: .public)")
+                if applied {
+                    IdeaForgeLog.workflow.error("Local speech transcription failed for recording \(recording.id, privacy: .private); reason: \(diagnostic.message, privacy: .public)")
+                } else {
+                    IdeaForgeLog.workflow.error("Local speech transcription failure state was not applied for recording \(recording.id, privacy: .private)")
+                }
             }
         }
 
-        IdeaForgeLog.workflow.info("Local speech transcription run completed; attempted: \(summary.attemptedCount, privacy: .public), completed: \(summary.completedCount, privacy: .public), failed: \(summary.failedCount, privacy: .public)")
+        IdeaForgeLog.workflow.info("Local speech transcription run completed; attempted: \(summary.attemptedCount, privacy: .public), completed: \(summary.completedCount, privacy: .public), failed: \(summary.failedCount, privacy: .public), titles generated: \(summary.titleGeneratedCount, privacy: .public), preserved: \(summary.titlePreservedCount, privacy: .public), unavailable: \(summary.titleUnavailableCount, privacy: .public), title failures: \(summary.titleFailedCount, privacy: .public)")
         return summary
+    }
+
+    public func localSpeechTranscriptionCandidates(maxRecordingsPerRun: Int = 2) -> [Recording] {
+        Array(
+            projects
+                .flatMap(\.recordings)
+                .filter { recording in
+                    guard recording.localFileStatus == .available || recording.localFileStatus == .uploaded,
+                          recording.localAudioPath?.isEmpty == false,
+                          recording.syncStatus != .ready,
+                          recording.syncStatus != .transcribing else {
+                        return false
+                    }
+                    if recording.syncStatus == .failed {
+                        return recording.processingDiagnostic?.isRetryable == true
+                    }
+                    return true
+                }
+                .prefix(maxRecordingsPerRun)
+        )
+    }
+
+    @discardableResult
+    public func keepRecordingWithoutTranscript(recordingID: String, now: Date = Date()) -> Bool {
+        guard let projectIndex = projects.firstIndex(where: { project in
+            project.recordings.contains(where: { $0.id == recordingID })
+        }),
+        let recordingIndex = projects[projectIndex].recordings.firstIndex(where: { $0.id == recordingID }) else {
+            return false
+        }
+        let recording = projects[projectIndex].recordings[recordingIndex]
+        let hasRetainedAudio = (recording.localFileStatus == .uploaded && recording.audioObjectKey?.isEmpty == false)
+            || (recording.localFileStatus == .available && recording.localAudioPath?.isEmpty == false)
+        guard recording.syncStatus == .failed,
+              recording.processingDiagnostic?.isRetryable == false,
+              hasRetainedAudio else {
+            return false
+        }
+
+        let originalState = workspaceState()
+        let originalTranscript = projects[projectIndex].transcript
+        let reviewedSegmentID = "segment_\(recordingID)"
+        let remainingSegments = originalTranscript.segments.filter { $0.id != reviewedSegmentID }
+        var remainingFragments = originalTranscript.unclearFragments
+        for fragment in originalTranscript.unclearFragmentsByRecordingID[recordingID] ?? [] {
+            if let index = remainingFragments.firstIndex(of: fragment) {
+                remainingFragments.remove(at: index)
+            }
+        }
+        var remainingFragmentsByRecordingID = originalTranscript.unclearFragmentsByRecordingID
+        remainingFragmentsByRecordingID.removeValue(forKey: recordingID)
+        var cleanTextParts: [String] = []
+        if let legacyText = unsegmentedText(in: originalTranscript) {
+            cleanTextParts.append(legacyText)
+        }
+        cleanTextParts.append(contentsOf: remainingSegments.map(\.text))
+        let cleanText = cleanTextParts
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n\n")
+        projects[projectIndex].transcript = Transcript(
+            cleanText: cleanText,
+            segments: remainingSegments,
+            unclearFragments: remainingFragments,
+            unclearFragmentsByRecordingID: remainingFragmentsByRecordingID
+        )
+        projects[projectIndex].summary = cleanText
+        projects[projectIndex].updatedAt = max(projects[projectIndex].updatedAt, now)
+        updateRecording(recordingID: recordingID, event: .ready, now: now)
+        syncHealth.failingItems = max(0, syncHealth.failingItems - 1)
+        guard save(now: max(originalState.updatedAt, now)) else {
+            restoreLiveState(originalState)
+            lastErrorMessage = "Recording review could not be saved."
+            return false
+        }
+        return true
     }
 
     @discardableResult
@@ -3139,6 +3351,34 @@ public final class IdeaForgeStore {
     }
 
     @discardableResult
+    public func recoverInterruptedTranscriptions(now: Date = Date()) -> Int {
+        let originalState = workspaceState()
+        var recoveredCount = 0
+        for projectIndex in projects.indices {
+            for recordingIndex in projects[projectIndex].recordings.indices
+            where projects[projectIndex].recordings[recordingIndex].syncStatus == .transcribing {
+                projects[projectIndex].recordings[recordingIndex].syncStatus = .failed
+                projects[projectIndex].recordings[recordingIndex].processingDiagnostic = RecordingProcessingDiagnostic(
+                    code: .transcriptionFailed,
+                    message: "Transcription was interrupted and will retry.",
+                    isRetryable: true,
+                    failedAt: now
+                )
+                projects[projectIndex].updatedAt = max(projects[projectIndex].updatedAt, now)
+                recoveredCount += 1
+            }
+        }
+        guard recoveredCount > 0 else { return 0 }
+        guard save(now: max(originalState.updatedAt, now)) else {
+            restoreLiveState(originalState)
+            lastErrorMessage = "Interrupted transcription recovery could not be saved."
+            return 0
+        }
+        IdeaForgeLog.workflow.warning("Recovered interrupted transcriptions; count: \(recoveredCount, privacy: .public)")
+        return recoveredCount
+    }
+
+    @discardableResult
     public func markUploadFailed(
         recordingID: String,
         message: String,
@@ -3234,7 +3474,10 @@ public final class IdeaForgeStore {
         candidateProjects[projectIndex].recordings[recordingIndex].localFileStatus = .available
         let isWatch = candidateProjects[projectIndex].recordings[recordingIndex].deviceName.localizedCaseInsensitiveContains("watch")
         candidateProjects[projectIndex].recordings[recordingIndex].syncStatus = isWatch ? .transferredToIPhone : .pending
-        candidateHealth.failingItems = max(0, candidateHealth.failingItems - 1)
+        candidateHealth.failingItems = candidateProjects
+            .flatMap(\.recordings)
+            .filter { $0.syncStatus == .failed }
+            .count
         candidateHealth.queuedUploads = candidateJobs.filter { job in
             job.status == .queued || job.status == .uploading || job.status == .waitingForRetry
         }.count
@@ -3260,6 +3503,67 @@ public final class IdeaForgeStore {
             lastErrorMessage = "Could not save the upload retry."
             IdeaForgeLog.workspace.error("Upload retry persistence failed")
             return false
+        }
+    }
+
+    @discardableResult
+    func recoverRelocatedTransferredRecordingAudio(
+        inboxDirectory: URL,
+        fileManager: FileManager = .default
+    ) -> Int {
+        guard !workspaceLoadFailed else { return 0 }
+        let originalState = workspaceState()
+        var candidateProjects = projects
+        var candidateJobs = uploadJobs
+        var recoveredCount = 0
+
+        for projectIndex in candidateProjects.indices {
+            for recordingIndex in candidateProjects[projectIndex].recordings.indices {
+                let recording = candidateProjects[projectIndex].recordings[recordingIndex]
+                guard let stalePath = recording.localAudioPath,
+                      !fileManager.fileExists(atPath: stalePath),
+                      URL(fileURLWithPath: stalePath).deletingLastPathComponent().path
+                        .hasSuffix("/IdeaForge/Recordings/Transferred"),
+                      let jobIndex = candidateJobs.firstIndex(where: {
+                          $0.recordingID == recording.id && $0.localAudioPath == stalePath
+                      }) else {
+                    continue
+                }
+
+                let relocatedURL = inboxDirectory.appending(path: URL(fileURLWithPath: stalePath).lastPathComponent)
+                guard fileManager.isReadableFile(atPath: relocatedURL.path),
+                      let values = try? relocatedURL.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey]),
+                      values.isRegularFile == true,
+                      values.isSymbolicLink != true else {
+                    continue
+                }
+                candidateProjects[projectIndex].recordings[recordingIndex].localAudioPath = relocatedURL.path
+                candidateJobs[jobIndex].localAudioPath = relocatedURL.path
+                recoveredCount += 1
+            }
+        }
+
+        guard recoveredCount > 0 else { return 0 }
+        let candidateState = WorkspaceState(
+            projects: candidateProjects,
+            workflowTemplates: workflowTemplates,
+            uploadJobs: candidateJobs,
+            privacyMode: privacyMode,
+            syncHealth: syncHealth,
+            selectedProjectID: selectedProjectID,
+            updatedAt: updatedAt
+        )
+        do {
+            try repository.save(candidateState)
+            projects = candidateProjects
+            uploadJobs = candidateJobs
+            IdeaForgeLog.workspace.info("Recovered relocated transferred recording paths; count: \(recoveredCount, privacy: .public)")
+            return recoveredCount
+        } catch {
+            restoreLiveState(originalState)
+            lastErrorMessage = "Relocated transferred recordings could not be saved."
+            IdeaForgeLog.workspace.error("Relocated transferred recording path recovery could not be saved")
+            return 0
         }
     }
 
@@ -3372,13 +3676,299 @@ public final class IdeaForgeStore {
         }
     }
 
-    private func apply(transcript: Transcript, to projectID: String, recordingID: String, now: Date) {
-        guard let projectIndex = projects.firstIndex(where: { $0.id == projectID }) else { return }
-        projects[projectIndex].transcript = transcript
-        projects[projectIndex].summary = transcript.cleanText
-        projects[projectIndex].updatedAt = now
-        updateRecording(recordingID: recordingID, event: .ready)
-        save(now: now)
+    private func beginTranscription(recordingID: String, now: Date) -> RecordingProcessingCheckpoint? {
+        guard let projectIndex = projects.firstIndex(where: { project in
+            project.recordings.contains(where: { $0.id == recordingID })
+        }),
+        let recordingIndex = projects[projectIndex].recordings.firstIndex(where: { $0.id == recordingID }) else {
+            lastErrorMessage = "Recording changed before transcription could start. Retry from the current workspace."
+            return nil
+        }
+
+        let originalState = workspaceState()
+        let clearsExistingFailure = projects[projectIndex].recordings[recordingIndex].syncStatus == .failed
+        updateRecording(recordingID: recordingID, event: .transcribing, now: now)
+        guard save(now: now) else {
+            restoreLiveState(originalState)
+            lastErrorMessage = "Transcription could not start because workspace state could not be saved."
+            return nil
+        }
+
+        guard let checkpointProject = projects.first(where: { $0.id == projects[projectIndex].id }),
+              let checkpointRecording = checkpointProject.recordings.first(where: { $0.id == recordingID }),
+              checkpointRecording.syncStatus == .transcribing else {
+            restoreLiveState(originalState)
+            lastErrorMessage = "Recording changed before transcription could start. Retry from the current workspace."
+            return nil
+        }
+        return RecordingProcessingCheckpoint(
+            recording: checkpointRecording,
+            transcript: checkpointProject.transcript,
+            transcriptionHint: checkpointProject.summary,
+            clearsExistingFailure: clearsExistingFailure
+        )
+    }
+
+    @MainActor
+    private func generatedTitleOutcome(
+        for transcript: Transcript,
+        recording: Recording,
+        titleGeneration: any IdeaTitleGenerating
+    ) async -> TitleGenerationOutcome {
+        guard let currentTitle = projects.first(where: { $0.id == recording.ideaProjectID })?.title else {
+            return .preserved
+        }
+        guard IdeaTitlePolicy.normalizedGeneratedTitle(
+            "Title generation eligibility probe",
+            currentTitle: currentTitle
+        ) != nil else {
+            return .preserved
+        }
+
+        let availability = await titleGeneration.availability(for: recording.languageHint)
+        guard availability == .available else {
+            return .unavailable(availability)
+        }
+
+        do {
+            let result = try await titleGeneration.generateTitle(
+                for: IdeaTitleGenerationRequest(
+                    transcript: transcript.cleanText,
+                    currentTitle: currentTitle,
+                    localeIdentifier: recording.languageHint
+                )
+            )
+            guard let generatedTitle = IdeaTitlePolicy.normalizedGeneratedTitle(
+                result.title,
+                currentTitle: currentTitle
+            ) else {
+                return .failed
+            }
+            let digest = SHA256.hash(data: Data(transcript.cleanText.utf8))
+                .map { String(format: "%02x", $0) }.joined()
+            return .generated(
+                generatedTitle,
+                providerIdentifier: result.providerIdentifier ?? "unspecified",
+                transcriptSHA256: digest
+            )
+        } catch let error as FoundationTitleGenerationError {
+            if let availability = error.availability {
+                return .unavailable(availability)
+            }
+            return .failed
+        } catch {
+            return .failed
+        }
+    }
+
+    private func apply(
+        transcript: Transcript,
+        titleOutcome: TitleGenerationOutcome,
+        to projectID: String,
+        checkpoint: RecordingProcessingCheckpoint,
+        now: Date
+    ) -> TitleGenerationOutcome? {
+        guard let projectIndex = currentTranscriptionProjectIndex(for: checkpoint, projectID: projectID) else {
+            lastErrorMessage = "Recording changed while transcription was running. Retry from the current workspace."
+            return nil
+        }
+        let originalState = workspaceState()
+        let completionAt = processingCompletionDate(
+            requested: now,
+            workspace: originalState,
+            projectUpdatedAt: projects[projectIndex].updatedAt
+        )
+        let mergedTranscript = transcriptByMerging(
+            transcript,
+            into: projects[projectIndex].transcript,
+            recording: checkpoint.recording,
+            preservesUnsegmentedText: projects[projectIndex].recordings.count > 1
+                || !projects[projectIndex].transcript.segments.isEmpty
+        )
+        projects[projectIndex].transcript = mergedTranscript
+        projects[projectIndex].summary = mergedTranscript.cleanText
+        var persistedTitleOutcome = titleOutcome
+        if let generatedTitle = titleOutcome.generatedTitle {
+            if let protectedTitle = IdeaTitlePolicy.normalizedGeneratedTitle(
+                generatedTitle,
+                currentTitle: projects[projectIndex].title
+            ) {
+                projects[projectIndex].title = protectedTitle
+                if case .generated(_, let provider, let digest) = titleOutcome {
+                    projects[projectIndex].titleProvenance = TitleGenerationProvenance(
+                        providerIdentifier: provider,
+                        generatedTitle: protectedTitle,
+                        recordingID: checkpoint.recording.id,
+                        transcriptSHA256: digest,
+                        generatedAt: completionAt
+                    )
+                }
+            } else {
+                persistedTitleOutcome = .preserved
+            }
+        }
+        projects[projectIndex].updatedAt = completionAt
+        updateRecording(recordingID: checkpoint.recording.id, event: .ready)
+        clearProcessingDiagnostic(recordingID: checkpoint.recording.id, now: completionAt)
+        if checkpoint.clearsExistingFailure {
+            syncHealth.failingItems = max(0, syncHealth.failingItems - 1)
+        }
+        guard save(now: completionAt) else {
+            restoreLiveState(originalState)
+            lastErrorMessage = "Transcript enrichment could not be saved."
+            return nil
+        }
+        return persistedTitleOutcome
+    }
+
+    private func applyTranscriptionFailure(
+        _ diagnostic: RecordingProcessingDiagnostic,
+        to projectID: String,
+        checkpoint: RecordingProcessingCheckpoint,
+        now: Date
+    ) -> Bool {
+        guard currentTranscriptionProjectIndex(for: checkpoint, projectID: projectID) != nil else {
+            lastErrorMessage = "Recording changed while transcription was running. Retry from the current workspace."
+            return false
+        }
+        let originalState = workspaceState()
+        let completionAt = processingCompletionDate(
+            requested: now,
+            workspace: originalState,
+            projectUpdatedAt: originalState.projects.first(where: { $0.id == projectID })?.updatedAt ?? now
+        )
+        var persistedDiagnostic = diagnostic
+        persistedDiagnostic.failedAt = completionAt
+        updateRecording(recordingID: checkpoint.recording.id, event: .transcriptionFailed)
+        setProcessingDiagnostic(persistedDiagnostic, recordingID: checkpoint.recording.id, now: completionAt)
+        if !checkpoint.clearsExistingFailure {
+            syncHealth.failingItems += 1
+        }
+        guard save(now: completionAt) else {
+            restoreLiveState(originalState)
+            lastErrorMessage = "Transcription failure could not be saved."
+            return false
+        }
+        lastErrorMessage = persistedDiagnostic.message
+        return true
+    }
+
+    private func currentTranscriptionProjectIndex(
+        for checkpoint: RecordingProcessingCheckpoint,
+        projectID: String
+    ) -> Int? {
+        guard let projectIndex = projects.firstIndex(where: { $0.id == projectID }),
+              let recordingIndex = projects[projectIndex].recordings.firstIndex(where: {
+                  $0.id == checkpoint.recording.id
+              }),
+              projects[projectIndex].recordings[recordingIndex] == checkpoint.recording,
+              projects[projectIndex].recordings[recordingIndex].syncStatus == .transcribing,
+              projects[projectIndex].transcript == checkpoint.transcript else {
+            return nil
+        }
+        return projectIndex
+    }
+
+    private func processingCompletionDate(
+        requested: Date,
+        workspace: WorkspaceState,
+        projectUpdatedAt: Date
+    ) -> Date {
+        let lastPublishedAt = workspace.syncHealth.lastPublishedLocalUpdatedAt
+            ?? workspace.syncHealth.lastRemoteWorkspaceUpdatedAt
+            ?? .distantPast
+        return max(requested, workspace.updatedAt, projectUpdatedAt, lastPublishedAt.addingTimeInterval(1))
+    }
+
+    private func transcriptByMerging(
+        _ incoming: Transcript,
+        into existing: Transcript,
+        recording: Recording,
+        preservesUnsegmentedText: Bool
+    ) -> Transcript {
+        let stableSegmentID = "segment_\(recording.id)"
+        let incomingSegment = TranscriptSegment(
+            id: stableSegmentID,
+            startSeconds: incoming.segments.map(\.startSeconds).min() ?? 0,
+            endSeconds: incoming.segments.map(\.endSeconds).max() ?? max(recording.durationSeconds, 1),
+            text: incoming.cleanText,
+            isMarkedImportant: incoming.segments.contains(where: \.isMarkedImportant)
+                || !recording.markerOffsets.isEmpty
+        )
+        var segments = existing.segments
+        if preservesUnsegmentedText,
+           !segments.contains(where: { $0.id == "segment_legacy_unowned" }),
+           let legacyText = unsegmentedText(in: existing) {
+            segments.append(
+                TranscriptSegment(
+                    id: "segment_legacy_unowned",
+                    startSeconds: 0,
+                    endSeconds: 0,
+                    text: legacyText,
+                    isMarkedImportant: false
+                )
+            )
+        }
+        if let existingIndex = segments.firstIndex(where: { $0.id == stableSegmentID }) {
+            segments[existingIndex] = incomingSegment
+        } else {
+            segments.append(incomingSegment)
+        }
+
+        let cleanText = segments
+            .map(\.text)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n\n")
+        var unclearFragments = existing.unclearFragments
+        let previouslyOwnedFragments = existing.unclearFragmentsByRecordingID[recording.id] ?? []
+        for fragment in previouslyOwnedFragments {
+            if let index = unclearFragments.firstIndex(of: fragment) {
+                unclearFragments.remove(at: index)
+            }
+        }
+        let incomingFragments = incoming.unclearFragments.reduce(into: [String]()) {
+            if !$0.contains($1) { $0.append($1) }
+        }
+        unclearFragments.append(contentsOf: incomingFragments)
+        var unclearFragmentsByRecordingID = existing.unclearFragmentsByRecordingID
+        if incomingFragments.isEmpty {
+            unclearFragmentsByRecordingID.removeValue(forKey: recording.id)
+        } else {
+            unclearFragmentsByRecordingID[recording.id] = incomingFragments
+        }
+        return Transcript(
+            cleanText: cleanText,
+            segments: segments,
+            unclearFragments: unclearFragments,
+            unclearFragmentsByRecordingID: unclearFragmentsByRecordingID
+        )
+    }
+
+    private func unsegmentedText(in transcript: Transcript) -> String? {
+        var paragraphs = transcript.cleanText
+            .components(separatedBy: "\n\n")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        for segment in transcript.segments where segment.id != "segment_legacy_unowned" {
+            let segmentText = segment.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let index = paragraphs.firstIndex(of: segmentText) {
+                paragraphs.remove(at: index)
+            }
+        }
+        let legacyText = paragraphs.joined(separator: "\n\n")
+        return legacyText.isEmpty ? nil : legacyText
+    }
+
+    private func clearProcessingDiagnostic(recordingID: String, now: Date) {
+        for projectIndex in projects.indices {
+            guard let recordingIndex = projects[projectIndex].recordings.firstIndex(where: { $0.id == recordingID }) else {
+                continue
+            }
+            projects[projectIndex].recordings[recordingIndex].processingDiagnostic = nil
+            projects[projectIndex].updatedAt = now
+            return
+        }
     }
 
     @MainActor

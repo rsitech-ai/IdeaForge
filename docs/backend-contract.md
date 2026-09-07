@@ -1,9 +1,11 @@
 # IdeaForge Backend Contract
 
-The production app is backend-first. The backend owns object storage, workspace
-snapshots, AI orchestration, usage limits, and future integrations. Client apps
-store only the base URL, endpoint paths, and a Keychain-held bearer token.
-Each configured backend request is scoped by an explicit workspace identifier.
+When a backend is enabled, it owns shared workspace snapshots, configured
+recording retention, optional AI orchestration, usage limits, and future
+integrations. Client apps store only the base URL, endpoint paths, and a
+Keychain-held bearer token. Each configured backend request is scoped by an
+explicit workspace identifier. Private Local mode remains fully usable without
+any backend.
 
 ## Local Mock
 
@@ -271,6 +273,63 @@ workflow_results completed async workflow artifact payloads, referenced by job I
 accounts      workspace-bound local account rows and provisioned session metadata
 schema_migrations applied local backend schema contract versions
 ```
+
+## Production-local backend
+
+`script/local_backend.py` is the separate single-operator production-local
+entry point. It does not import fixture workspace state, deterministic provider
+responses, development tokens, example account URLs, or the mock server's
+remote provisioning behavior.
+
+Its configuration is fail-closed and environment-based:
+
+```bash
+export IDEAFORGE_LOCAL_BACKEND_DATA_ROOT="$HOME/Library/Application Support/IdeaForge/LocalBackend"
+export IDEAFORGE_LOCAL_BACKEND_WORKSPACE_ID="workspace_rsi"
+export IDEAFORGE_LOCAL_BACKEND_BIND_HOST="192.168.50.4"
+export IDEAFORGE_LOCAL_BACKEND_ALLOWED_CIDRS="127.0.0.0/8,192.168.50.0/24"
+export IDEAFORGE_LOCAL_BACKEND_TLS_CERT="$IDEAFORGE_LOCAL_BACKEND_DATA_ROOT/tls/server.pem"
+export IDEAFORGE_LOCAL_BACKEND_TLS_KEY="$IDEAFORGE_LOCAL_BACKEND_DATA_ROOT/tls/server-key.pem"
+
+script/local_backend.py initialize
+script/local_backend.py check-readiness
+script/local_backend.py create-pairing-code "Rafal iPhone"
+script/local_backend.py serve
+```
+
+Initialization creates an owner-only SQLite database, applies immutable
+checksum-verified migrations, and creates the single configured workspace.
+Readiness output is content-free. Pairing codes contain at least 128 bits of
+randomness, expire after five minutes, and can be consumed once through
+`POST /v1/local/pair`. A successful exchange returns a 256-bit device token
+once; the client stores it in Keychain and the backend persists only its
+SHA-256 digest. Device tokens are independently revocable and scoped to the
+configured workspace.
+
+The current production-local routes are:
+
+- `GET /health/live`
+- `GET /health/ready`
+- `POST /v1/local/pair`
+- `GET /v1/auth/session`
+- `GET /v1/workspace/snapshot`
+- `PUT /v1/workspace/snapshot`
+
+Workspace publications are transactional, compare parsed UTC revisions,
+honor `X-IdeaForge-Base-Remote-Updated-At`, and use `Idempotency-Key` when
+provided. Existing clients that do not yet send an idempotency header receive
+request-digest idempotency at the server boundary. Upload jobs and
+`localAudioPath` values are removed from shared snapshots before persistence.
+
+The service can bind only to a literal private or loopback address and accepts
+only configured bounded private/loopback CIDRs. `serve` requires the configured
+certificate and private key and wraps the listener in TLS; it does not provide
+an HTTP fallback. The production-local package now includes recording storage,
+durable jobs, persistent request rate limits, TLS provisioning, a user
+LaunchAgent installer, local backup/restore, device list/revocation commands,
+and Apple client pairing UX. OpenAI remains disabled and the production-local
+runtime makes no provider request. See [LOCAL_BACKEND.md](LOCAL_BACKEND.md) for
+the exact operational boundary and installation procedure.
 
 ## Authentication
 

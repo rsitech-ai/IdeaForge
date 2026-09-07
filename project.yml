@@ -100,6 +100,18 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.s1kor.ideaforge.ios.uitests
         GENERATE_INFOPLIST_FILE: YES
         TEST_TARGET_NAME: IdeaForgeiOS
+  IdeaForgeWatchUITests:
+    type: bundle.ui-testing
+    platform: watchOS
+    sources:
+      - path: Tests/IdeaForgeWatchUITests
+    dependencies:
+      - target: IdeaForgeWatch
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.s1kor.ideaforge.ios.watch.uitests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: IdeaForgeWatch
 schemes:
   IdeaForgeMac:
     build:
@@ -121,3 +133,7 @@ schemes:
     build:
       targets:
         IdeaForgeWatch: all
+        IdeaForgeWatchUITests: [test]
+    test:
+      targets:
+        - name: IdeaForgeWatchUITests

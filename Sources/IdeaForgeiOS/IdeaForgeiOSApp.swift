@@ -9,6 +9,7 @@ struct IdeaForgeiOSApp: App {
     @State private var store: IdeaForgeStore
     @State private var uploadProcessingCoordinator: UploadQueueProcessingCoordinator
     @State private var didRunBackgroundCallerProbe = false
+    @State private var isReconcilingMacEnrichment = false
     @Environment(\.scenePhase) private var scenePhase
     private let backendConfigurationManager: BackendConfigurationManager
     private let recordingTransferService: any RecordingTransferService
@@ -42,7 +43,7 @@ struct IdeaForgeiOSApp: App {
                     Task { @MainActor in
                         _ = await backgroundCoordinator.runRefresh()
                     }
-                    IdeaForgeLog.sync.info("Watch recording transfer imported and downstream sync scheduled")
+                    IdeaForgeLog.sync.info("Watch recording transfer imported; upload and Mac enrichment handoff scheduled")
                     return .imported
                 } catch {
                     store.lastErrorMessage = (error as? UserFacingIdeaForgeError)?.userFacingMessage ?? "Watch transfer import failed."
@@ -95,6 +96,7 @@ struct IdeaForgeiOSApp: App {
                 store: store,
                 backendConfigurationManager: backendConfigurationManager,
                 uploadProcessingCoordinator: uploadProcessingCoordinator,
+                recordingTransferService: recordingTransferService,
                 pushNotificationTokenCenter: pushNotificationTokenCenter
             )
             .preferredColorScheme(Self.uiTestingPreferredColorScheme)
@@ -109,7 +111,14 @@ struct IdeaForgeiOSApp: App {
                 if phase == .background {
                     IdeaForgeLog.lifecycle.info("iOS app entered background")
                     backgroundUploadCoordinator.scheduleIfNeeded()
+                } else if phase == .active {
+                    Task { @MainActor in
+                        await reconcileMacEnrichmentIfAvailable()
+                    }
                 }
+            }
+            .task {
+                await pollForMacEnrichmentWhileForegrounded()
             }
         }
         .backgroundTask(.appRefresh(IdeaForgeBackgroundTasks.uploadRefreshIdentifier)) {
@@ -125,6 +134,52 @@ struct IdeaForgeiOSApp: App {
             backendConfigurationManager: backendConfigurationManager,
             uploadProcessingCoordinator: uploadProcessingCoordinator
         )
+    }
+
+    /// The local backend cannot rely on APNs, so an active iPhone periodically
+    /// pulls Mac-produced transcript/title updates. Watch receives only the
+    /// compact title/status projection through durable application context.
+    @MainActor
+    private func pollForMacEnrichmentWhileForegrounded() async {
+        guard !ProcessInfo.processInfo.arguments.contains("-uiTesting") else { return }
+
+        while !Task.isCancelled {
+            if scenePhase == .active {
+                await reconcileMacEnrichmentIfAvailable()
+            }
+            do {
+                try await Task.sleep(for: .seconds(15))
+            } catch {
+                return
+            }
+        }
+    }
+
+    @MainActor
+    private func reconcileMacEnrichmentIfAvailable() async {
+        guard !isReconcilingMacEnrichment else { return }
+        isReconcilingMacEnrichment = true
+        defer { isReconcilingMacEnrichment = false }
+
+        do {
+            guard let syncConfiguration = try backendConfigurationManager.resolvedSyncConfiguration() else {
+                return
+            }
+            let summary = try await WorkspaceSyncEngine(
+                client: BackendWorkspaceSyncClient(configuration: syncConfiguration)
+            ).pullLatestPreservingLocalUploadWork(into: store)
+            try recordingTransferService.publish(
+                WatchEnrichmentProjection(projects: store.projects)
+            )
+            if summary.appliedRemoteSnapshot {
+                IdeaForgeLog.sync.info("Mac enrichment reconciled automatically and Watch projection queued")
+            }
+        } catch let conflict as WorkspaceSyncConflictError {
+            IdeaForgeLog.sync.notice("Automatic Mac enrichment pull paused for review; project conflicts: \(conflict.report.projectContentConflicts.count, privacy: .public)")
+        } catch {
+            let diagnostic = WorkspaceSyncFailureDiagnostic.classify(error)
+            IdeaForgeLog.sync.info("Automatic Mac enrichment pull deferred; category: \(diagnostic.category.rawValue, privacy: .public)")
+        }
     }
 
     @MainActor
@@ -157,6 +212,19 @@ struct IdeaForgeiOSApp: App {
     }
 
     private static func makeBackendConfigurationManager() -> BackendConfigurationManager {
+        if ProcessInfo.processInfo.arguments.contains("-uiTestingLocalBackend") {
+            return BackendConfigurationManager(
+                settingsStore: InMemoryBackendSettingsStore(
+                    settings: BackendConnectionSettings(
+                        baseURLString: "https://ideaforge-test.local:8765",
+                        workspaceID: "",
+                        isEnabled: true,
+                        connectionKind: .localBackend
+                    )
+                ),
+                credentialStore: InMemoryBackendCredentialStore()
+            )
+        }
         guard ProcessInfo.processInfo.arguments.contains("-uiTestingInvalidUploadConfiguration") else {
             return .production()
         }
@@ -192,6 +260,9 @@ struct IdeaForgeiOSApp: App {
         }
         if ProcessInfo.processInfo.arguments.contains("-uiTestingFailedUpload") {
             return SampleData.taskFirstStore(state: .failedUpload)
+        }
+        if ProcessInfo.processInfo.arguments.contains("-uiTestingNonRetryableTranscriptFailure") {
+            return SampleData.nonRetryableTranscriptFailureStore()
         }
         if ProcessInfo.processInfo.arguments.contains("-uiTestingOfflineWatch") {
             return SampleData.taskFirstStore(state: .offlineWatch)

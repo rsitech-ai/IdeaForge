@@ -2,6 +2,42 @@ import XCTest
 @testable import IdeaForgeCore
 
 final class IdeaAgentTests: XCTestCase {
+    func testFoundationAgentUsesRetrievedEvidenceAndPreservesCitations() async {
+        let agent = SystemFoundationIdeaAgent(
+            availability: { .available },
+            generation: { request in
+                XCTAssertTrue(request.evidence.contains("IdeaForge"))
+                XCTAssertTrue(request.evidence.contains("Transcript") || request.evidence.contains("Question"))
+                return "Start with the builder interview because the local workspace identifies it as the next validation step."
+            }
+        )
+
+        let response = await agent.respond(
+            to: "What should I validate next?",
+            projects: WorkspaceState.seed().projects
+        )
+
+        XCTAssertEqual(response.generationMode, .foundationModel)
+        XCTAssertFalse(response.citations.isEmpty)
+        XCTAssertTrue(response.answer.contains("builder interview"))
+    }
+
+    func testFoundationAgentFallsBackTruthfullyWhenModelIsUnavailable() async {
+        let agent = SystemFoundationIdeaAgent(
+            availability: { .deviceNotEligible },
+            generation: { _ in XCTFail("Unavailable model must not generate"); return "" }
+        )
+
+        let response = await agent.respond(
+            to: "What should I validate next?",
+            projects: WorkspaceState.seed().projects
+        )
+
+        XCTAssertEqual(response.generationMode, .localRetrieval)
+        XCTAssertTrue(response.answer.contains("Based on local idea context"))
+        XCTAssertFalse(response.citations.isEmpty)
+    }
+
     func testRespondsWithGroundedCitationForKnownIdeaQuestion() {
         let state = WorkspaceState.seed()
         let response = LocalIdeaAgent().respond(
@@ -40,4 +76,3 @@ final class IdeaAgentTests: XCTestCase {
         XCTAssertTrue(response.citations.isEmpty)
     }
 }
-

@@ -13,9 +13,9 @@ Mac studio and export --------+---- IdeaForgeCore ---- local workspace and encry
         |                     |
         | HTTPS               +---- backend clients and capability gates
         v
-Community backend or operator service
+Production-local backend, mock backend, or operator service
         |
-        +---- object storage, workspace state, jobs, usage, account URLs
+        +---- local recording files, workspace state, and durable jobs
         +---- optional transcription and workflow providers
 ```
 
@@ -30,7 +30,7 @@ The Watch-to-Mac path is intentionally two-stage:
 3. The iPhone uploads due audio work and publishes a device-neutral workspace snapshot to the configured backend.
 4. iPhone and Mac synchronization pull from the last accepted remote revision before push. A newer remote revision is applied before either client publishes local changes. Independent projects are merged and published in the same synchronization pass; edits to the same project stop for review.
 
-Queued transfers and import acknowledgements tolerate temporary reachability loss. A Watch receipt is not considered complete until its state is saved locally. Physical paired-device testing remains required because Simulator does not exercise WatchConnectivity file transfer.
+Queued transfers and import acknowledgements tolerate temporary reachability loss. A Watch receipt is not considered complete until its state is saved locally. The Watch relay derives its post-launch presentation from durable Watch recording states, prioritizing failed and pending work before acknowledged captures so unresolved clips remain visible after relaunch. Physical paired-device testing remains required because Simulator does not exercise WatchConnectivity file transfer.
 
 ## Local data boundary
 
@@ -42,9 +42,19 @@ Workspace snapshots exclude device-local audio paths, upload jobs, Watch reachab
 
 Background URL-session completion is not acknowledged to the system until the iPhone has reconciled the durable upload receipt and run the next queue refresh. App appearance performs the same reconciliation as a recovery path.
 
+## Local enrichment boundary
+
+Local enrichment has two deliberately separate Apple-system steps on iPhone and Mac. Apple Speech reads the recording that is already present in that device's local container; the request requires on-device recognition and fails explicitly when that recognizer, authorization, or local audio is unavailable. It does not fall back to a network speech-recognition request. A Watch capture must therefore complete its normal Watch-to-iPhone handoff before the iPhone can transcribe it; the Watch does not run this enrichment path.
+
+After transcription completes, the optional title step uses Foundation Models only to propose a concise title grounded in that completed transcript. The coordinator then persists the transcript, title outcome, ready state, and revision together. Foundation Models is not a transcription provider; an unavailable or failed title proposal remains nonfatal, so the transcript is persisted and an existing non-placeholder title is preserved. Foundation Models is considered unavailable when the framework or required operating system is absent, the device is not eligible, Apple Intelligence is disabled, the model is not ready, or the transcript locale is unsupported. The model path is limited to iPhone and Mac; eligibility and actual output still require runtime verification on the target physical device.
+
+When backend workspace sync is configured and capability-gated, its device-neutral snapshot carries the saved project transcript, title, and revision timestamps, but never a device-local audio path. A receiving device restores only audio state that it already owns for a matching recording; a new device hydrates the enriched project with no local audio path. Private Local mode keeps automatic backend sync off. Local Backend mode uses a separately paired device credential and private-LAN HTTPS endpoint; it does not imply a hosted service.
+
 ## Backend boundary
 
-The repository contains `script/mock_backend.py`, a single-node community server. It uses a configured bearer token, one workspace scope, local object files, and SQLite. It can exercise the protocol and optional provider adapters. It cannot isolate unrelated users or meet production availability and operations requirements.
+The repository contains two backend implementations with different purposes. `script/local_backend.py` is the production-local, one-operator service: SQLite WAL is canonical for workspace, device, idempotency, rate-limit, and job state; recordings are ordinary owner-only files; devices pair with single-use codes and hold distinct revocable credentials; traffic is CA-verified HTTPS restricted to configured private CIDRs. It includes local backup/restore, `_ideaforge._tcp` Bonjour advertisement, and a user LaunchAgent. With pristine settings, the Mac app discovers a private HTTPS endpoint without enabling sync or overwriting an existing configuration. When Local Backend is paired and configured, the LaunchAgent owns process start and crash recovery through `RunAtLoad` and `KeepAlive`; the sandboxed Mac app checks readiness on launch, allows one bounded recovery window for connectivity or timeout failures, checks readiness again, and synchronizes the workspace after readiness. TLS, first-time LaunchAgent installation, and pairing remain explicit setup boundaries. It has no S3-compatible store, public ingress, multi-tenant boundary, or automatic OpenAI path.
+
+`script/mock_backend.py` is the protocol-development server. It uses one configured bearer token, one workspace scope, local files, and SQLite, but has no TLS, device pairing, or production operations design. Do not expose it to the LAN or internet.
 
 An operator may build a separate hosted service against [backend-contract.md](backend-contract.md). That service owns authentication, authorization, durable storage, provider calls, usage decisions, account URLs, deletion, monitoring, and compliance. No hosted production service is part of this source release.
 

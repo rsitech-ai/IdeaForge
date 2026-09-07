@@ -2,8 +2,205 @@ import Foundation
 
 public enum BackendSyncError: Error, Equatable {
     case invalidResponse
-    case requestFailed(String)
-    case preconditionFailed(String)
+    case httpStatus(Int)
+    case revisionConflict
+}
+
+public enum WorkspaceSyncFailureCategory: String, Equatable, Sendable {
+    case configuration
+    case connectivity
+    case hostLookup
+    case connectionLost
+    case timeout
+    case certificateTrust
+    case authentication
+    case permission
+    case rateLimited
+    case backendUnavailable
+    case revisionConflict
+    case invalidResponse
+    case unknown
+}
+
+public struct WorkspaceSyncFailureDiagnostic: Equatable, Sendable {
+    public var category: WorkspaceSyncFailureCategory
+    public var receiptTitle: String
+    public var userFacingMessage: String
+    public var isRetryable: Bool
+
+    public init(
+        category: WorkspaceSyncFailureCategory,
+        receiptTitle: String,
+        userFacingMessage: String,
+        isRetryable: Bool
+    ) {
+        self.category = category
+        self.receiptTitle = receiptTitle
+        self.userFacingMessage = userFacingMessage
+        self.isRetryable = isRetryable
+    }
+
+    public static func classify(_ error: Error) -> WorkspaceSyncFailureDiagnostic {
+        if let urlError = error as? URLError {
+            return classify(urlError)
+        }
+        if let syncError = error as? BackendSyncError {
+            switch syncError {
+            case .invalidResponse:
+                return diagnostic(
+                    .invalidResponse,
+                    "Publish response invalid",
+                    "Backend returned an unreadable response. Update or restart the backend, then retry.",
+                    false
+                )
+            case .revisionConflict:
+                return diagnostic(
+                    .revisionConflict,
+                    "Publish needs refresh",
+                    "Workspace changed on another device. Refresh from the backend and review before publishing again.",
+                    false
+                )
+            case .httpStatus(let statusCode):
+                return classify(statusCode: statusCode)
+            }
+        }
+        if let authError = error as? BackendAuthError {
+            switch authError {
+            case .unauthorized:
+                return classify(statusCode: 401)
+            case .invalidResponse:
+                return classify(BackendSyncError.invalidResponse)
+            case .requestFailed:
+                return diagnostic(
+                    .unknown,
+                    "Session validation failed",
+                    "Backend session could not be validated. Check Local Backend status and try again.",
+                    true
+                )
+            }
+        }
+        if error is BackendConfigurationError {
+            return diagnostic(
+                .configuration,
+                "Publish configuration invalid",
+                "Backend settings are incomplete or invalid. Review the connection in Account or Settings.",
+                false
+            )
+        }
+        return diagnostic(
+            .unknown,
+            "Publish failed",
+            "Workspace could not be published. Retry once, then review Local Backend status in Settings.",
+            true
+        )
+    }
+
+    private static func classify(_ error: URLError) -> WorkspaceSyncFailureDiagnostic {
+        switch error.code {
+        case .cannotFindHost, .dnsLookupFailed:
+            return diagnostic(
+                .hostLookup,
+                "Backend not found",
+                "Backend host could not be found. Confirm the Mac and iPhone are on the same network.",
+                true
+            )
+        case .networkConnectionLost:
+            return diagnostic(
+                .connectionLost,
+                "Connection interrupted",
+                "Backend connection was interrupted. Keep the Mac awake and retry after the network settles.",
+                true
+            )
+        case .timedOut:
+            return diagnostic(
+                .timeout,
+                "Backend timed out",
+                "Backend did not respond in time. Check its status on the Mac, then retry.",
+                true
+            )
+        case .serverCertificateUntrusted,
+             .serverCertificateHasBadDate,
+             .serverCertificateHasUnknownRoot,
+             .serverCertificateNotYetValid,
+             .secureConnectionFailed:
+            return diagnostic(
+                .certificateTrust,
+                "Certificate not trusted",
+                "Local Backend certificate is not trusted. Install or renew the IdeaForge Local CA before retrying.",
+                false
+            )
+        case .notConnectedToInternet, .cannotConnectToHost, .internationalRoamingOff, .dataNotAllowed:
+            return diagnostic(
+                .connectivity,
+                "Backend unreachable",
+                "Backend is unreachable. Check Wi-Fi, confirm the Mac is awake, and retry.",
+                true
+            )
+        default:
+            return diagnostic(
+                .connectivity,
+                "Backend connection failed",
+                "Backend connection failed. Check the Mac and local network, then retry.",
+                true
+            )
+        }
+    }
+
+    private static func classify(statusCode: Int) -> WorkspaceSyncFailureDiagnostic {
+        switch statusCode {
+        case 401:
+            return diagnostic(
+                .authentication,
+                "Pairing required",
+                "Backend session is no longer valid. Pair or sign in again, then retry.",
+                false
+            )
+        case 403:
+            return diagnostic(
+                .permission,
+                "Workspace access denied",
+                "Backend denied workspace access. Confirm the paired device and workspace, then retry.",
+                false
+            )
+        case 409, 412:
+            return classify(BackendSyncError.revisionConflict)
+        case 429:
+            return diagnostic(
+                .rateLimited,
+                "Backend is busy",
+                "Backend received too many requests. Wait briefly before retrying.",
+                true
+            )
+        case 500...599:
+            return diagnostic(
+                .backendUnavailable,
+                "Backend unavailable",
+                "Backend is temporarily unavailable. Check its Mac status and retry.",
+                true
+            )
+        default:
+            return diagnostic(
+                .invalidResponse,
+                "Backend rejected publish",
+                "Backend rejected the workspace request. Validate the session and connection settings.",
+                false
+            )
+        }
+    }
+
+    private static func diagnostic(
+        _ category: WorkspaceSyncFailureCategory,
+        _ receiptTitle: String,
+        _ userFacingMessage: String,
+        _ isRetryable: Bool
+    ) -> WorkspaceSyncFailureDiagnostic {
+        WorkspaceSyncFailureDiagnostic(
+            category: category,
+            receiptTitle: receiptTitle,
+            userFacingMessage: userFacingMessage,
+            isRetryable: isRetryable
+        )
+    }
 }
 
 public struct BackendSyncConfiguration: Equatable, Sendable {
@@ -81,12 +278,17 @@ public struct BackendWorkspaceSyncClient: Sendable {
             return try await fetchWorkspaceSnapshot(since: nil)
         }
         guard (200..<300).contains(response.statusCode) else {
-            throw BackendSyncError.requestFailed("HTTP \(response.statusCode)")
+            throw BackendSyncError.httpStatus(response.statusCode)
         }
 
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        let state = try decoder.decode(WorkspaceState.self, from: data)
+        let state: WorkspaceState
+        do {
+            state = try decoder.decode(WorkspaceState.self, from: data)
+        } catch {
+            throw BackendSyncError.invalidResponse
+        }
         guard WorkspaceSyncPayloadPolicy.isStructurallyValid(state) else {
             throw BackendSyncError.invalidResponse
         }
@@ -119,15 +321,20 @@ public struct BackendWorkspaceSyncClient: Sendable {
         case 200..<300:
             let decoder = JSONDecoder()
             decoder.dateDecodingStrategy = .iso8601
-            let receipt = try decoder.decode(WorkspaceSyncPushReceipt.self, from: data)
+            let receipt: WorkspaceSyncPushReceipt
+            do {
+                receipt = try decoder.decode(WorkspaceSyncPushReceipt.self, from: data)
+            } catch {
+                throw BackendSyncError.invalidResponse
+            }
             guard receipt.workspaceID == configuration.workspaceID else {
                 throw BackendSyncError.invalidResponse
             }
             return receipt
         case 409, 412:
-            throw BackendSyncError.preconditionFailed("Remote workspace changed before local snapshot publish.")
+            throw BackendSyncError.revisionConflict
         default:
-            throw BackendSyncError.requestFailed("HTTP \(response.statusCode)")
+            throw BackendSyncError.httpStatus(response.statusCode)
         }
     }
 }
@@ -1824,10 +2031,10 @@ public struct WorkspaceSyncEngine: Sendable {
                 acceptedLocalUpdatedAt: localUpdatedAt,
                 localUpdatedAt: localUpdatedAt
             )
-        } catch BackendSyncError.preconditionFailed {
+        } catch BackendSyncError.revisionConflict {
             let remoteState = try await client.fetchWorkspaceSnapshot(since: nil)
             _ = try store.applyRemoteWorkspaceSnapshot(remoteState, syncedAt: syncedAt)
-            throw BackendSyncError.preconditionFailed("Remote workspace changed before local snapshot publish.")
+            throw BackendSyncError.revisionConflict
         }
     }
 

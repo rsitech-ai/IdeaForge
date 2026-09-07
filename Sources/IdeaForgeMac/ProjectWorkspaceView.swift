@@ -1,7 +1,6 @@
 import SwiftUI
 
 struct ProjectWorkspaceView: View {
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var selectedTab: ProjectWorkspaceTab = .overview
     @State private var showsDeleteConfirmation = false
 
@@ -26,15 +25,14 @@ struct ProjectWorkspaceView: View {
     var onUpdateTranscriptSegment: (String, String, String, Bool) -> Void = { _, _, _, _ in }
     var onPrepareCodexPacket: () -> Void = {}
     var onExportCodexPacket: () -> Void = {}
+    var onExportIdeaBrief: () -> Void = {}
 
     private var tabSelection: Binding<ProjectWorkspaceTab> {
         Binding(
             get: { selectedTab },
             set: { newValue in
                 guard selectedTab != newValue else { return }
-                withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.18)) {
-                    selectedTab = newValue
-                }
+                selectedTab = newValue
             }
         )
     }
@@ -56,6 +54,8 @@ struct ProjectWorkspaceView: View {
             )
         case .questions:
             QuestionsPane(project: project)
+        case .assistant:
+            MacIdeaAgentPane(project: project)
         case .plan:
             PlanPane(
                 project: project,
@@ -75,6 +75,7 @@ struct ProjectWorkspaceView: View {
             FilesPane(
                 project: project,
                 onUpdateArtifactMarkdown: onUpdateArtifactMarkdown,
+                onExportIdeaBrief: onExportIdeaBrief,
                 onPrepareCodexPacket: onPrepareCodexPacket,
                 onExportCodexPacket: onExportCodexPacket
             )
@@ -99,7 +100,7 @@ struct ProjectWorkspaceView: View {
                 .accessibilityIdentifier("mac.projectWorkspace.tabs")
                 .accessibilityLabel("Project tabs")
                 .accessibilityValue(selectedTab.label)
-                .accessibilityHint("Choose Overview, Transcript, Questions, Plan, or Files")
+                .accessibilityHint("Choose Summary, Transcript, Questions, Ask, Plan, or Files")
 
                 Spacer(minLength: 12)
 
@@ -120,10 +121,9 @@ struct ProjectWorkspaceView: View {
             selectedContent
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 .clipped()
-                .transition(.opacity)
                 .layoutPriority(1)
         }
-        .padding(20)
+        .padding(16)
         .frame(minWidth: 360, maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .focusSection()
         .accessibilityElement(children: .contain)
@@ -148,6 +148,7 @@ private enum ProjectWorkspaceTab: String, CaseIterable, Identifiable {
     case overview
     case transcript
     case questions
+    case assistant
     case plan
     case files
 
@@ -155,9 +156,10 @@ private enum ProjectWorkspaceTab: String, CaseIterable, Identifiable {
 
     var label: String {
         switch self {
-        case .overview: "Overview"
+        case .overview: "Summary"
         case .transcript: "Transcript"
         case .questions: "Questions"
+        case .assistant: "Ask"
         case .plan: "Plan"
         case .files: "Files"
         }
@@ -547,6 +549,7 @@ private struct WorkflowTemplatesPane: View {
 private struct FilesPane: View {
     var project: IdeaProject
     var onUpdateArtifactMarkdown: (String, String) -> Void
+    var onExportIdeaBrief: () -> Void
     var onPrepareCodexPacket: () -> Void
     var onExportCodexPacket: () -> Void
 
@@ -556,6 +559,12 @@ private struct FilesPane: View {
                 Label("Exports", systemImage: "square.and.arrow.up")
                     .font(.headline)
                 Spacer()
+                Button(action: onExportIdeaBrief) {
+                    Label("Export Markdown", systemImage: "doc.badge.arrow.up")
+                }
+                .controlSize(.small)
+                .accessibilityIdentifier("mac.files.exportIdeaBrief")
+                .help("Save a Markdown idea brief with the actual transcript")
                 Button(action: onPrepareCodexPacket) {
                     Label("Prepare Codex Packet", systemImage: "shippingbox")
                 }
@@ -576,6 +585,108 @@ private struct FilesPane: View {
                 .accessibilityIdentifier("mac.files.artifacts")
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+}
+
+private struct MacIdeaAgentPane: View {
+    var project: IdeaProject
+    @State private var query = "What should I validate next?"
+    @State private var response: IdeaAgentResponse?
+    @State private var isAnswering = false
+    private let agent = SystemFoundationIdeaAgent()
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Label("Ask this idea", systemImage: "sparkles")
+                        .font(.title3.weight(.semibold))
+                    Text("Answers use cited local workspace evidence. The on-device Foundation Model is used when available; otherwise IdeaForge keeps a deterministic local answer.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                HStack(alignment: .top, spacing: 10) {
+                    TextField("Ask about the transcript, risks, users, or next steps", text: $query, axis: .vertical)
+                        .lineLimit(2...5)
+                        .textFieldStyle(.roundedBorder)
+                        .accessibilityIdentifier("mac.ideaAgent.query")
+                    Button {
+                        ask(query)
+                    } label: {
+                        if isAnswering {
+                            ProgressView()
+                                .controlSize(.small)
+                        } else {
+                            Label("Ask", systemImage: "arrow.up.circle.fill")
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(isAnswering || query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .accessibilityIdentifier("mac.ideaAgent.ask")
+                }
+
+                Button("Summarize transcript") {
+                    let prompt = "Summarize the transcript for \(project.title), including the core idea, intended user, and next decision."
+                    query = prompt
+                    ask(prompt)
+                }
+                .buttonStyle(.bordered)
+                .disabled(isAnswering || project.transcript.cleanText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .accessibilityIdentifier("mac.ideaAgent.summarize")
+
+                if let response {
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack {
+                            Text("Answer")
+                                .font(.headline)
+                            Spacer()
+                            Text(response.generationMode == .foundationModel ? "On-device model" : "Local retrieval")
+                                .font(.caption.weight(.medium))
+                                .foregroundStyle(.secondary)
+                        }
+                        Text(response.answer)
+                            .textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .accessibilityIdentifier("mac.ideaAgent.answer")
+
+                        if !response.citations.isEmpty {
+                            Divider()
+                            Text("Grounded in")
+                                .font(.subheadline.weight(.semibold))
+                            ForEach(response.citations) { citation in
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(citation.sourceTitle)
+                                        .font(.caption.weight(.semibold))
+                                    Text(citation.excerpt)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                        .textSelection(.enabled)
+                                }
+                                .padding(10)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                            }
+                        }
+                    }
+                    .padding(16)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                }
+            }
+            .padding(20)
+            .frame(maxWidth: 820, alignment: .leading)
+        }
+        .accessibilityIdentifier("mac.ideaAgent")
+    }
+
+    private func ask(_ prompt: String) {
+        guard !isAnswering else { return }
+        isAnswering = true
+        Task {
+            response = await agent.respond(to: prompt, projects: [project])
+            isAnswering = false
+        }
     }
 }
 

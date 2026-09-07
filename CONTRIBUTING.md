@@ -25,6 +25,7 @@ be merged until their commits are corrected.
    ```sh
    xcodegen generate
    swift test
+   python3 -m unittest discover -s Tests/LocalBackendTests
    python3 script/test_audit_public_source.py
    python3 script/test_create_public_source_snapshot.py
    python3 script/test_ci_release_config.py

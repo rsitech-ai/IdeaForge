@@ -64,11 +64,131 @@ public struct AIProcessingSummary: Equatable, Sendable {
     public var attemptedCount: Int
     public var completedCount: Int
     public var failedCount: Int
+    public var titleGeneratedCount: Int
+    public var titlePreservedCount: Int
+    public var titleUnavailableCount: Int
+    public var titleUnavailableReasons: [IdeaTitleGenerationAvailability: Int]
+    public var titleFailedCount: Int
 
-    public init(attemptedCount: Int = 0, completedCount: Int = 0, failedCount: Int = 0) {
+    public init(
+        attemptedCount: Int = 0,
+        completedCount: Int = 0,
+        failedCount: Int = 0,
+        titleGeneratedCount: Int = 0,
+        titlePreservedCount: Int = 0,
+        titleUnavailableCount: Int = 0,
+        titleUnavailableReasons: [IdeaTitleGenerationAvailability: Int] = [:],
+        titleFailedCount: Int = 0
+    ) {
         self.attemptedCount = attemptedCount
         self.completedCount = completedCount
         self.failedCount = failedCount
+        self.titleGeneratedCount = titleGeneratedCount
+        self.titlePreservedCount = titlePreservedCount
+        self.titleUnavailableCount = titleUnavailableCount
+        self.titleUnavailableReasons = titleUnavailableReasons
+        self.titleFailedCount = titleFailedCount
+    }
+}
+
+public enum LocalEnrichmentPresentation {
+    public static func preflightMessage(
+        availabilities: [IdeaTitleGenerationAvailability],
+        readyLocation: String
+    ) -> String {
+        guard !availabilities.isEmpty else {
+            return "Transcript: no local recordings are ready. Title: no candidate recording language to check."
+        }
+        if Set(availabilities).count == 1, let availability = availabilities.first {
+            let transcript = availabilities.count == 1
+                ? "Transcript: 1 local recording is ready."
+                : "Transcript: \(availabilities.count) local recordings are ready."
+            return "\(transcript) \(availabilitySentence(availability, readyLocation: readyLocation))"
+        }
+        return "Transcript: \(availabilities.count) local recordings are ready. Title: availability varies — \(reasonCounts(availabilities).joined(separator: "; "))."
+    }
+
+    public static func outcomeMessage(_ summary: AIProcessingSummary) -> String {
+        let transcriptMessage = summary.attemptedCount == 0
+            ? "Transcript: no local recordings are ready."
+            : "Transcript: \(summary.completedCount) ready, \(summary.failedCount) need review."
+        let titleMessage: String
+        if summary.completedCount == 0 {
+            titleMessage = "Title: no completed transcript to enrich."
+        } else if summary.titleGeneratedCount == summary.completedCount {
+            titleMessage = "Title: generated \(summary.titleGeneratedCount) \(summary.titleGeneratedCount == 1 ? "title" : "titles")."
+        } else if summary.titlePreservedCount == summary.completedCount {
+            titleMessage = "Title: kept \(summary.titlePreservedCount) existing \(summary.titlePreservedCount == 1 ? "title" : "titles")."
+        } else if summary.titleUnavailableCount == summary.completedCount,
+                  summary.titleUnavailableReasons.count == 1,
+                  let availability = summary.titleUnavailableReasons.keys.first {
+            titleMessage = "\(availabilitySentence(availability, readyLocation: "this device")) Existing titles kept."
+        } else if summary.titleFailedCount == summary.completedCount {
+            titleMessage = "Title: generation failed; kept existing titles."
+        } else {
+            var parts = [
+                "\(summary.titleGeneratedCount) generated",
+                "\(summary.titlePreservedCount) kept",
+                "\(summary.titleUnavailableCount) unavailable",
+                "\(summary.titleFailedCount) failed"
+            ]
+            if !summary.titleUnavailableReasons.isEmpty {
+                parts.append("reasons — \(reasonCounts(summary.titleUnavailableReasons).joined(separator: "; "))")
+            }
+            titleMessage = "Title: \(parts.joined(separator: ", "))."
+        }
+        return "\(transcriptMessage) \(titleMessage)"
+    }
+
+    public static func availabilitySentence(
+        _ availability: IdeaTitleGenerationAvailability,
+        readyLocation: String
+    ) -> String {
+        switch availability {
+        case .available: "Title: Foundation Models ready on \(readyLocation)."
+        case .deviceNotEligible: "Title: Foundation Models unavailable on this device."
+        case .appleIntelligenceNotEnabled: "Title: turn on Apple Intelligence to use Foundation Models."
+        case .modelNotReady: "Title: the Apple Intelligence model is not ready yet."
+        case .unsupportedLocale: "Title: Foundation Models does not support this recording language."
+        case .frameworkUnavailable: "Title: Foundation Models is not included on this platform."
+        case .operatingSystemUnsupported: "Title: Foundation Models requires a newer operating system."
+        }
+    }
+
+    private static func reasonCounts(
+        _ availabilities: [IdeaTitleGenerationAvailability]
+    ) -> [String] {
+        reasonCounts(Dictionary(grouping: availabilities, by: { $0 }).mapValues(\.count))
+    }
+
+    private static func reasonCounts(
+        _ counts: [IdeaTitleGenerationAvailability: Int]
+    ) -> [String] {
+        let order: [IdeaTitleGenerationAvailability] = [
+            .available,
+            .deviceNotEligible,
+            .appleIntelligenceNotEnabled,
+            .modelNotReady,
+            .unsupportedLocale,
+            .frameworkUnavailable,
+            .operatingSystemUnsupported
+        ]
+        return order.compactMap { availability in
+            guard let count = counts[availability], count > 0 else { return nil }
+            return "\(reasonLabel(availability)): \(count)"
+        }
+    }
+
+    private static func reasonLabel(_ availability: IdeaTitleGenerationAvailability) -> String {
+        switch availability {
+        case .available: "Foundation Models ready"
+        case .deviceNotEligible: "device not eligible"
+        case .appleIntelligenceNotEnabled: "turn on Apple Intelligence"
+        case .modelNotReady: "model not ready"
+        case .unsupportedLocale: "unsupported recording language"
+        case .frameworkUnavailable: "framework unavailable"
+        case .operatingSystemUnsupported: "newer operating system required"
+        }
     }
 }
 
@@ -565,17 +685,20 @@ public struct LocalExportService: ExportService {
 
 public struct IdeaForgeServices: Sendable {
     public var transcription: any TranscriptionService
+    public var titleGeneration: any IdeaTitleGenerating
     public var workflow: any WorkflowExecutionService
     public var syncQueue: any SyncQueueService
     public var export: any ExportService
 
     public init(
         transcription: any TranscriptionService,
+        titleGeneration: any IdeaTitleGenerating = SystemFoundationTitleGenerator(),
         workflow: any WorkflowExecutionService,
         syncQueue: any SyncQueueService,
         export: any ExportService
     ) {
         self.transcription = transcription
+        self.titleGeneration = titleGeneration
         self.workflow = workflow
         self.syncQueue = syncQueue
         self.export = export
@@ -583,6 +706,7 @@ public struct IdeaForgeServices: Sendable {
 
     public static let local = IdeaForgeServices(
         transcription: LocalTranscriptionService(),
+        titleGeneration: SystemFoundationTitleGenerator(),
         workflow: LocalWorkflowExecutionService(),
         syncQueue: LocalSyncQueueService(),
         export: LocalExportService()
@@ -590,6 +714,7 @@ public struct IdeaForgeServices: Sendable {
 
     public static let localSpeech = IdeaForgeServices(
         transcription: LocalSpeechTranscriptionService(),
+        titleGeneration: SystemFoundationTitleGenerator(),
         workflow: LocalWorkflowExecutionService(),
         syncQueue: LocalSyncQueueService(),
         export: LocalExportService()

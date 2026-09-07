@@ -20,6 +20,12 @@
   <string>IdeaForge records voice ideas when you start a capture.</string>
   <key>NSSpeechRecognitionUsageDescription</key>
   <string>IdeaForge can transcribe your synced voice ideas locally when you choose local speech recognition.</string>
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>IdeaForge connects to your private Local Backend to sync recordings and ideas between your iPhone and Mac.</string>
+  <key>NSBonjourServices</key>
+  <array>
+    <string>_ideaforge._tcp</string>
+  </array>
   <key>BGTaskSchedulerPermittedIdentifiers</key>
   <array>
     <string>com.s1kor.ideaforge.upload-refresh</string>
