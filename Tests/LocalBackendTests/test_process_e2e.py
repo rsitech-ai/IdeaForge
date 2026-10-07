@@ -81,17 +81,26 @@ class LocalBackendProcessE2ETests(unittest.TestCase):
                 process = subprocess.Popen([*command, "serve"], env=environment,
                                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
                 processes.append(process)
-                deadline = time.monotonic() + 10
+                # Cold shared runners may spend longer initializing Python,
+                # SQLite and native service registration than a warm laptop.
+                deadline = time.monotonic() + 45
+                last_connection_error = "no readiness response"
                 while time.monotonic() < deadline:
                     try:
                         if request("GET", "/health/ready") == (200, {"status": "ready"}):
                             return process
-                    except (OSError, http.client.HTTPException):
-                        pass
+                    except (OSError, http.client.HTTPException) as error:
+                        last_connection_error = f"{type(error).__name__}: {error}"
                     if process.poll() is not None:
                         break
                     time.sleep(.1)
-                self.fail("Backend did not become ready with trusted TLS")
+                if process.poll() is None:
+                    process.kill()
+                output, errors = process.communicate(timeout=10)
+                self.fail(
+                    f"Backend did not become ready with trusted TLS; {last_connection_error}; "
+                    f"exit={process.returncode}; stdout={output!r}; stderr={errors!r}"
+                )
 
             try:
                 process = start()
