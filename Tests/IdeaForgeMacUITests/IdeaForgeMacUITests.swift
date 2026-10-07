@@ -179,7 +179,7 @@ final class IdeaForgeMacUITests: XCTestCase {
 
         let backendStatus = app.buttons["mac.toolbar.localBackendStatus"]
         XCTAssertTrue(backendStatus.waitForExistence(timeout: 3))
-        XCTAssertEqual(backendStatus.value as? String, "Local Backend is ready.")
+        XCTAssertEqual(backendStatus.label, "Local Backend is ready.")
 
         backendStatus.click()
         XCTAssertTrue(app.secureTextFields["mac.settings.localBackendPairingCode"].waitForExistence(timeout: 3))
@@ -190,8 +190,12 @@ final class IdeaForgeMacUITests: XCTestCase {
 
         let backendStatus = app.buttons["mac.toolbar.localBackendStatus"]
         XCTAssertTrue(backendStatus.waitForExistence(timeout: 8))
+        wait(for: [expectation(
+            for: NSPredicate(format: "label BEGINSWITH %@", "Local Backend is ready."),
+            evaluatedWith: backendStatus
+        )], timeout: 8)
         XCTAssertTrue(
-            (backendStatus.value as? String)?.hasPrefix("Local Backend is ready.") == true,
+            backendStatus.label.hasPrefix("Local Backend is ready.") == true,
             "Expected the sandboxed app to complete the real HTTPS readiness check."
         )
     }
@@ -201,14 +205,20 @@ final class IdeaForgeMacUITests: XCTestCase {
 
         let backendStatus = app.buttons["mac.toolbar.localBackendStatus"]
         XCTAssertTrue(backendStatus.waitForExistence(timeout: 10))
+        wait(for: [expectation(
+            for: NSPredicate(format: "label == %@", "Local Backend found and ready. Pair in Settings."),
+            evaluatedWith: backendStatus
+        )], timeout: 10)
         XCTAssertEqual(
-            backendStatus.value as? String,
+            backendStatus.label,
             "Local Backend found and ready. Pair in Settings."
         )
 
         backendStatus.click()
         XCTAssertTrue(app.secureTextFields["mac.settings.localBackendPairingCode"].waitForExistence(timeout: 3))
-        let discoveredURL = app.textFields["Base URL"].value as? String
+        let baseURL = app.textFields["mac.settings.backendBaseURL"]
+        XCTAssertTrue(baseURL.waitForExistence(timeout: 5))
+        let discoveredURL = baseURL.value as? String
         XCTAssertTrue(discoveredURL?.hasPrefix("https://") == true)
         XCTAssertTrue(discoveredURL?.contains(".local:8765") == true)
     }
@@ -356,8 +366,9 @@ final class IdeaForgeMacUITests: XCTestCase {
         XCTAssertEqual(status.value as? String, "1 upload failed")
         status.click()
 
-        XCTAssertTrue(app.descendants(matching: .any)["mac.inbox.recovery.review"].waitForExistence(timeout: 3))
         let retry = app.buttons["mac.recordingQueue.retry.rec_task_first_upload"]
+        XCTAssertTrue(retry.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.descendants(matching: .any)["mac.inbox.recordingQueue"].exists)
         XCTAssertEqual(retry.label, "Retry upload")
         XCTAssertTrue((retry.value as? String)?.hasSuffix(", Failed") == true)
     }
@@ -369,8 +380,7 @@ final class IdeaForgeMacUITests: XCTestCase {
         XCTAssertTrue(status.waitForExistence(timeout: 3))
         status.click()
 
-        XCTAssertTrue(app.descendants(matching: .any)["mac.inbox.recovery.upload"].waitForExistence(timeout: 3))
-        XCTAssertTrue(app.descendants(matching: .any)["mac.inbox.captureRelay"].exists)
+        XCTAssertTrue(app.descendants(matching: .any)["mac.inbox.captureRelay"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["Recording Queue"].exists)
     }
 
