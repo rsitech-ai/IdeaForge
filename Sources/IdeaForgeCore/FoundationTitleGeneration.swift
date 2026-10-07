@@ -198,6 +198,11 @@ public struct SystemFoundationTitleGenerator: IdeaTitleGenerating {
             model: .default,
             instructions: "Generate one concise title grounded only in the provided transcript. Do not add facts."
         )
+        #if compiler(>=6.4)
+        let options = GenerationOptions(samplingMode: .greedy, temperature: 0.1, maximumResponseTokens: 32)
+        #else
+        let options = GenerationOptions(sampling: .greedy, temperature: 0.1, maximumResponseTokens: 32)
+        #endif
         let response = try await session.respond(
             to: Prompt("""
             Write the title in the transcript's language for locale \(request.localeIdentifier).
@@ -206,7 +211,7 @@ public struct SystemFoundationTitleGenerator: IdeaTitleGenerating {
             \(request.transcript)
             """),
             generating: FoundationTitlePayload.self,
-            options: GenerationOptions(sampling: .greedy, temperature: 0.1, maximumResponseTokens: 32)
+            options: options
         )
         return response.content.title
         #else

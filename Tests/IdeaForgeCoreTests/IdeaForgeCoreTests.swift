@@ -6912,7 +6912,7 @@ final class IdeaForgeCoreTests: XCTestCase {
     }
 
     @MainActor
-    func testWorkspaceSynchronizePullsBeforePublishingLocalChanges() async throws {
+    func testWorkspaceSynchronizePullsKnownRemoteBeforePublishingLocalChanges() async throws {
         let localUpdatedAt = Date(timeIntervalSince1970: 3_000)
         let remoteUpdatedAt = Date(timeIntervalSince1970: 2_000)
         var localState = WorkspaceState.seed()
@@ -6920,7 +6920,7 @@ final class IdeaForgeCoreTests: XCTestCase {
         localState.syncHealth.failingItems = 0
         localState.syncHealth.queuedUploads = 0
         localState.updatedAt = localUpdatedAt
-        localState.syncHealth.lastRemoteWorkspaceUpdatedAt = Date(timeIntervalSince1970: 1_000)
+        localState.syncHealth.lastRemoteWorkspaceUpdatedAt = remoteUpdatedAt
         var remoteState = localState
         remoteState.updatedAt = remoteUpdatedAt
         remoteState.syncHealth.lastRemoteWorkspaceUpdatedAt = remoteUpdatedAt
@@ -7069,6 +7069,99 @@ final class IdeaForgeCoreTests: XCTestCase {
         } catch {
             XCTAssertEqual(error as? BackendSyncError, .invalidResponse)
         }
+    }
+
+    @MainActor
+    func testClockAheadPullImportsUnseenRemoteProjectWithoutPublishingDeletion() async throws {
+        let baseline = Date(timeIntervalSince1970: 20_000)
+        var remote = WorkspaceState.seed()
+        remote.privacyMode = .standardCloud
+        remote.syncHealth.failingItems = 0
+        remote.uploadJobs = []
+        for index in remote.projects.indices { remote.projects[index].recordings = [] }
+        remote.updatedAt = baseline.addingTimeInterval(2)
+        var local = remote
+        local.projects.removeLast()
+        local.updatedAt = baseline.addingTimeInterval(3)
+        local.syncHealth.lastRemoteWorkspaceUpdatedAt = baseline
+        local.syncHealth.lastPublishedLocalUpdatedAt = baseline
+        let store = IdeaForgeStore(state: local)
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let transport = SequencedHTTPRequestTransport(responses: [
+            HTTPTestResponse(data: try encoder.encode(remote), statusCode: 200)
+        ])
+        let engine = WorkspaceSyncEngine(client: BackendWorkspaceSyncClient(
+            configuration: BackendSyncConfiguration(
+                baseURL: URL(string: "https://api.example.test")!,
+                bearerToken: "sync-token", workspaceID: "workspace_alpha"
+            ), transport: transport
+        ))
+        let result = try await engine.synchronize(store: store, syncedAt: baseline.addingTimeInterval(4))
+        XCTAssertTrue(result.appliedRemoteSnapshot)
+        XCTAssertEqual(Set(store.projects.map(\.id)), Set(remote.projects.map(\.id)))
+        let requests = await transport.capturedRequests()
+        XCTAssertEqual(requests.map(\.httpMethod), ["GET"])
+    }
+
+    @MainActor
+    func testAutomaticEnrichmentPullDoesNotPublishStaleTextWhenLocalWorkspaceHasOtherEdits() async throws {
+        try await assertEnrichmentPullRequiresReview(localRevisionOffset: 1)
+    }
+
+    @MainActor
+    func testAutomaticEnrichmentPullRequiresReviewEvenWhenLocalClockIsAhead() async throws {
+        try await assertEnrichmentPullRequiresReview(localRevisionOffset: 3)
+    }
+
+    @MainActor
+    private func assertEnrichmentPullRequiresReview(localRevisionOffset: TimeInterval) async throws {
+        let baseline = Date(timeIntervalSince1970: 20_000)
+        var local = WorkspaceState.seed()
+        local.privacyMode = .standardCloud
+        local.uploadJobs = []
+        local.syncHealth.failingItems = 0
+        for index in local.projects.indices {
+            local.projects[index].recordings = []
+        }
+        local.syncHealth.lastRemoteWorkspaceUpdatedAt = baseline
+        local.syncHealth.lastPublishedLocalUpdatedAt = baseline
+        local.projects[1].title = "Unpublished phone edit"
+        local.projects[1].updatedAt = baseline.addingTimeInterval(1)
+        local.updatedAt = baseline.addingTimeInterval(localRevisionOffset)
+        let store = IdeaForgeStore(state: local, repository: InMemoryWorkspaceRepository(state: local))
+        var remote = local
+        remote.projects[0].title = "Mac enriched title"
+        remote.projects[0].transcript.cleanText = "Complete Mac transcription."
+        remote.projects[0].updatedAt = baseline.addingTimeInterval(2)
+        remote.projects[1].title = "Previously published title"
+        remote.updatedAt = baseline.addingTimeInterval(2)
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let transport = SequencedHTTPRequestTransport(responses: [
+            HTTPTestResponse(data: try encoder.encode(remote), statusCode: 200),
+            HTTPTestResponse(data: try encoder.encode(WorkspaceSyncPushReceipt(
+                workspaceID: "workspace_alpha", acceptedUpdatedAt: baseline.addingTimeInterval(3)
+            )), statusCode: 200)
+        ])
+        let engine = WorkspaceSyncEngine(client: BackendWorkspaceSyncClient(
+            configuration: BackendSyncConfiguration(
+                baseURL: URL(string: "https://api.example.test")!,
+                bearerToken: "sync-token", workspaceID: "workspace_alpha"
+            ),
+            transport: transport
+        ))
+        do {
+            _ = try await engine.pullLatestPreservingLocalUploadWork(
+                into: store, syncedAt: baseline.addingTimeInterval(3)
+            )
+            XCTFail("Concurrent content changes require review before automatic publication.")
+        } catch is WorkspaceSyncConflictError {
+            XCTAssertNotNil(store.syncHealth.syncConflictStatus)
+        }
+        let requests = await transport.capturedRequests()
+        XCTAssertEqual(requests.map(\.httpMethod), ["GET"])
+        XCTAssertEqual(store.projects[1].title, "Unpublished phone edit")
     }
 
     func testBackendWorkspaceSyncClientRejectsBrokenWorkspaceRelationships() async throws {

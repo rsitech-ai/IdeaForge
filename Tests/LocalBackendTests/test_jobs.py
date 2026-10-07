@@ -20,6 +20,30 @@ NOW = datetime(2026, 8, 14, 12, 0, tzinfo=UTC)
 
 
 class JobQueueTests(unittest.TestCase):
+    def test_private_mode_deferral_preserves_last_attempt_for_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            _, queue = self.make_queue(directory)
+            job = queue.enqueue(WORKSPACE_ID, "recording_enrichment", "privacy", {}, NOW)
+            for index in range(2):
+                moment = NOW + timedelta(minutes=index)
+                queue.claim("worker", moment)
+                queue.fail(job.job_id, "worker", "speech_processing_failed", moment, retryable=True)
+            for index in range(5):
+                moment = NOW + timedelta(minutes=2 + index)
+                claimed = queue.claim("worker", moment)
+                self.assertEqual(claimed.attempt_count, 3)
+                deferred = queue.fail(
+                    job.job_id, "worker", "workspace_sync_disabled", moment, retryable=True,
+                )
+                self.assertEqual(deferred.status, "queued")
+                self.assertEqual(deferred.attempt_count, 2)
+                self.assertEqual(deferred.available_at, moment + timedelta(seconds=30))
+            resumed_at = NOW + timedelta(minutes=7)
+            resumed = queue.claim("worker", resumed_at)
+            self.assertEqual(resumed.attempt_count, 3)
+            completed = queue.complete(job.job_id, "worker", {"recovered": True}, resumed_at)
+            self.assertEqual(completed.status, "completed")
+
     def test_waiting_for_workspace_does_not_exhaust_transcription_attempts(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             _, queue = self.make_queue(directory)

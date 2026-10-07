@@ -106,7 +106,8 @@ class LocalBackendOperationsTests(unittest.TestCase):
             decoded_profile = Path(temporary_directory) / "decoded-profile.plist"
             verification = subprocess.run(
                 [
-                    "openssl", "smime", "-verify", "-noverify", "-inform", "der",
+                    "openssl", "smime", "-verify", "-inform", "der",
+                    "-CAfile", str(tls_root / "ca.cert.pem"),
                     "-in", str(profile_path), "-out", str(decoded_profile),
                 ],
                 text=True,
@@ -131,8 +132,27 @@ class LocalBackendOperationsTests(unittest.TestCase):
                 capture_output=True,
                 check=True,
             ).stdout
+            strict_verification = subprocess.run([
+                "openssl", "verify", "-x509_strict", "-CAfile",
+                str(tls_root / "ca.cert.pem"), str(tls_root / "server.cert.pem")
+            ], text=True, capture_output=True, check=False)
+            self.assertEqual(strict_verification.returncode, 0, strict_verification.stderr)
             self.assertIn("DNS:ideaforge-test.local", certificate_text)
             self.assertRegex(report["sha256Fingerprint"], r"^[0-9A-F:]{95}$")
+            # Simulate the previous installer CA without keyUsage. Existing
+            # trusted state must fail validation without silent CA rotation.
+            legacy = subprocess.run([
+                "openssl", "req", "-x509", "-new", "-sha256",
+                "-key", str(tls_root / "ca.key.pem"), "-days", "3650",
+                "-subj", "/CN=IdeaForge Local CA", "-out", str(tls_root / "ca.cert.pem")
+            ], capture_output=True, text=True, check=False)
+            self.assertEqual(legacy.returncode, 0, legacy.stderr)
+            original_files = {path.name: path.read_bytes() for path in tls_root.iterdir() if path.is_file()}
+            incompatible = subprocess.run(command, capture_output=True, text=True, check=False)
+            self.assertEqual(incompatible.returncode, 1)
+            self.assertEqual(json.loads(incompatible.stdout)["error"], "existing_tls_validation_failed")
+            self.assertEqual(original_files, {path.name: path.read_bytes() for path in tls_root.iterdir() if path.is_file()})
+
 
     def test_install_renders_bounded_launch_agent_and_uninstall_preserves_data(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

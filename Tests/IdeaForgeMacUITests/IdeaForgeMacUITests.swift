@@ -1,5 +1,6 @@
 import XCTest
 import Darwin
+import AppKit
 
 @MainActor
 final class IdeaForgeMacUITests: XCTestCase {
@@ -30,7 +31,7 @@ final class IdeaForgeMacUITests: XCTestCase {
             application.launchArguments = ["-uiTesting"]
             if testName.contains("CompactWindow") {
                 application.launchArguments.append("-uiTestingCompactWindow")
-            } else if testName.contains("WideWindow") {
+            } else if testName.contains("WideWindow") || testName.contains("InspectorShortcut") {
                 application.launchArguments.append("-uiTestingWideWindow")
             }
             if testName.contains("SyncConflictStatus") {
@@ -99,7 +100,7 @@ final class IdeaForgeMacUITests: XCTestCase {
     }
 
     func testMainWindowExposesPlanningWorkflowControls() {
-        XCTAssertTrue(app.windows["IdeaForge"].waitForExistence(timeout: 5))
+        XCTAssertTrue(mainWindow.waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["mac.toolbar.inbox"].exists)
         XCTAssertTrue(app.buttons["mac.toolbar.codexPacket"].exists)
         XCTAssertTrue(app.buttons["mac.toolbar.record"].exists)
@@ -112,7 +113,7 @@ final class IdeaForgeMacUITests: XCTestCase {
     }
 
     func testInspectorLocalEnrichmentReportsFoundationAvailabilityAndSeparateOutcomes() {
-        XCTAssertTrue(app.windows["IdeaForge"].waitForExistence(timeout: 5))
+        XCTAssertTrue(mainWindow.waitForExistence(timeout: 5))
         app.buttons["mac.toolbar.inspector"].click()
 
         let localEnrichment = app.buttons["mac.inspector.processLocalEnrichment"]
@@ -136,7 +137,7 @@ final class IdeaForgeMacUITests: XCTestCase {
     }
 
     func testMixedLocalEnrichmentOutcomeShowsExactUnavailableReason() {
-        XCTAssertTrue(app.windows["IdeaForge"].waitForExistence(timeout: 5))
+        XCTAssertTrue(mainWindow.waitForExistence(timeout: 5))
         app.buttons["mac.toolbar.inspector"].click()
         let status = app.descendants(matching: .any)["mac.inspector.localEnrichmentStatus"]
         XCTAssertTrue(status.waitForExistence(timeout: 2))
@@ -150,7 +151,7 @@ final class IdeaForgeMacUITests: XCTestCase {
     }
 
     func testSettingsUsesBackendAccountPortalInsteadOfAppStoreCommerce() {
-        XCTAssertTrue(app.windows["IdeaForge"].waitForExistence(timeout: 5))
+        XCTAssertTrue(mainWindow.waitForExistence(timeout: 5))
 
         app.typeKey(",", modifierFlags: .command)
 
@@ -164,7 +165,7 @@ final class IdeaForgeMacUITests: XCTestCase {
     }
 
     func testLocalBackendSettingsExposePairingAndLocalOnlyCopy() {
-        XCTAssertTrue(app.windows["IdeaForge"].waitForExistence(timeout: 5))
+        XCTAssertTrue(mainWindow.waitForExistence(timeout: 5))
         app.typeKey(",", modifierFlags: .command)
 
         XCTAssertTrue(app.secureTextFields["mac.settings.localBackendPairingCode"].waitForExistence(timeout: 3))
@@ -174,7 +175,7 @@ final class IdeaForgeMacUITests: XCTestCase {
     }
 
     func testLocalBackendToolbarReportsReadyAndOpensSettings() {
-        XCTAssertTrue(app.windows["IdeaForge"].waitForExistence(timeout: 5))
+        XCTAssertTrue(mainWindow.waitForExistence(timeout: 5))
 
         let backendStatus = app.buttons["mac.toolbar.localBackendStatus"]
         XCTAssertTrue(backendStatus.waitForExistence(timeout: 3))
@@ -185,7 +186,7 @@ final class IdeaForgeMacUITests: XCTestCase {
     }
 
     func testLiveLocalBackendReadinessRunsInsideSandboxedMacApp() {
-        XCTAssertTrue(app.windows["IdeaForge"].waitForExistence(timeout: 5))
+        XCTAssertTrue(mainWindow.waitForExistence(timeout: 5))
 
         let backendStatus = app.buttons["mac.toolbar.localBackendStatus"]
         XCTAssertTrue(backendStatus.waitForExistence(timeout: 8))
@@ -196,7 +197,7 @@ final class IdeaForgeMacUITests: XCTestCase {
     }
 
     func testLiveBonjourDiscoveryFindsBackendAndPrefillsSettings() {
-        XCTAssertTrue(app.windows["IdeaForge"].waitForExistence(timeout: 5))
+        XCTAssertTrue(mainWindow.waitForExistence(timeout: 5))
 
         let backendStatus = app.buttons["mac.toolbar.localBackendStatus"]
         XCTAssertTrue(backendStatus.waitForExistence(timeout: 10))
@@ -213,7 +214,7 @@ final class IdeaForgeMacUITests: XCTestCase {
     }
 
     func testTaskFirstWorkspaceHierarchy() {
-        XCTAssertTrue(app.windows["IdeaForge"].waitForExistence(timeout: 5))
+        XCTAssertTrue(mainWindow.waitForExistence(timeout: 5))
 
         XCTAssertTrue(app.descendants(matching: .any)["mac.sidebar.section.inbox"].exists)
         let projectRow = app.descendants(matching: .any)["mac.sidebar.project.idea_ideaforge"]
@@ -255,7 +256,7 @@ final class IdeaForgeMacUITests: XCTestCase {
     }
 
     func testTaskFirstAccessibilitySemanticsAndInspectorShortcut() {
-        XCTAssertTrue(app.windows["IdeaForge"].waitForExistence(timeout: 5))
+        XCTAssertTrue(mainWindow.waitForExistence(timeout: 5))
 
         let tools = app.descendants(matching: .any)["mac.sidebar.tools"]
         XCTAssertEqual(tools.label, "Tools")
@@ -284,8 +285,11 @@ final class IdeaForgeMacUITests: XCTestCase {
         XCTAssertTrue(selectedProject.exists)
     }
 
-    func testTabAndShiftTabTraversalReturnsFocusWithoutLosingProjectSelection() {
-        XCTAssertTrue(app.windows["IdeaForge"].waitForExistence(timeout: 5))
+    func testTabAndShiftTabTraversalReturnsFocusWithoutLosingProjectSelection() throws {
+        guard NSApplication.shared.isFullKeyboardAccessEnabled else {
+            throw XCTSkip("macOS Keyboard Navigation is disabled; Tab traversal requires that operator setting.")
+        }
+        XCTAssertTrue(mainWindow.waitForExistence(timeout: 5))
 
         let selectedProject = app.descendants(matching: .any)["mac.projectWorkspace.project.idea_ideaforge"]
         XCTAssertTrue(selectedProject.waitForExistence(timeout: 4))
@@ -302,7 +306,7 @@ final class IdeaForgeMacUITests: XCTestCase {
     }
 
     func testInspectorStartsClosedAndPreservesSelection() {
-        let window = app.windows["IdeaForge"]
+        let window = mainWindow
         XCTAssertTrue(window.waitForExistence(timeout: 5))
 
         let selectedProject = app.descendants(matching: .any)["mac.projectWorkspace.project.idea_ideaforge"]
@@ -328,7 +332,7 @@ final class IdeaForgeMacUITests: XCTestCase {
     }
 
     func testSyncConflictStatusRoutesDirectlyToResolver() {
-        XCTAssertTrue(app.windows["IdeaForge"].waitForExistence(timeout: 5))
+        XCTAssertTrue(mainWindow.waitForExistence(timeout: 5))
 
         let status = app.buttons["mac.sidebar.status.resolve"]
         XCTAssertTrue(status.waitForExistence(timeout: 3))
@@ -381,16 +385,16 @@ final class IdeaForgeMacUITests: XCTestCase {
     }
 
     func testSidebarCanNavigateBackToInboxFromSelectedProject() {
-        XCTAssertTrue(app.windows["IdeaForge"].waitForExistence(timeout: 5))
+        XCTAssertTrue(mainWindow.waitForExistence(timeout: 5))
         app.buttons["mac.toolbar.inbox"].firstMatch.click()
 
         XCTAssertTrue(app.staticTexts["Inbox"].waitForExistence(timeout: 2))
-        XCTAssertTrue(app.staticTexts["Queued recordings"].exists)
-        XCTAssertTrue(app.staticTexts["Pending questions"].exists)
+        XCTAssertTrue(app.descendants(matching: .any)["mac.inbox.recordingQueue"].exists)
+        XCTAssertFalse(app.descendants(matching: .any)["mac.projectWorkspace.project.idea_ideaforge"].exists)
     }
 
     func testQuietSignalMacInboxUsesCompactQueueAndSummaryMode() {
-        XCTAssertTrue(app.windows["IdeaForge"].waitForExistence(timeout: 5))
+        XCTAssertTrue(mainWindow.waitForExistence(timeout: 5))
 
         app.buttons["mac.toolbar.inbox"].click()
         XCTAssertTrue(app.descendants(matching: .any)["mac.inbox.captureRelay"].waitForExistence(timeout: 3))
@@ -405,7 +409,7 @@ final class IdeaForgeMacUITests: XCTestCase {
     }
 
     func testQuietSignalInspectorUsesNativeSectionsAndRetainsCommands() {
-        XCTAssertTrue(app.windows["IdeaForge"].waitForExistence(timeout: 5))
+        XCTAssertTrue(mainWindow.waitForExistence(timeout: 5))
 
         app.buttons["mac.toolbar.inspector"].click()
         XCTAssertTrue(app.descendants(matching: .any)["mac.inspector.summary"].waitForExistence(timeout: 3))
@@ -417,7 +421,7 @@ final class IdeaForgeMacUITests: XCTestCase {
     }
 
     func testProjectOverviewDoesNotCollapseIntoSlidingMiddleColumnInCompactWindow() throws {
-        let window = app.windows["IdeaForge"]
+        let window = mainWindow
         XCTAssertTrue(window.waitForExistence(timeout: 5))
 
         let overviewTabs = app.descendants(matching: .any)["mac.projectWorkspace.tabs"]
@@ -452,9 +456,12 @@ final class IdeaForgeMacUITests: XCTestCase {
     }
 
     func testMovedCapabilitiesRemainReachable() {
-        XCTAssertTrue(app.windows["IdeaForge"].waitForExistence(timeout: 5))
+        XCTAssertTrue(mainWindow.waitForExistence(timeout: 5))
 
-        let tools = app.disclosureTriangles["mac.sidebar.tools"]
+        // SwiftUI exposes the identifier on the disclosure row, while XCTest
+        // exposes its native triangle as a sibling accessibility element.
+        XCTAssertEqual(app.disclosureTriangles.count, 1)
+        let tools = app.disclosureTriangles.firstMatch
         XCTAssertTrue(tools.waitForExistence(timeout: 3))
         tools.click()
         for section in ["workflows", "templates", "exports", "integrations"] {
@@ -516,6 +523,12 @@ final class IdeaForgeMacUITests: XCTestCase {
         XCTAssertGreaterThan(summary.frame.width, overview.frame.width * 0.70)
         XCTAssertGreaterThanOrEqual(summary.frame.minX, overview.frame.minX + 12)
         XCTAssertLessThanOrEqual(overview.frame.maxX, window.frame.maxX)
+    }
+
+    private var mainWindow: XCUIElement {
+        app.windows.matching(NSPredicate(
+            format: "identifier BEGINSWITH %@", "mac.uiTesting.windowPreset."
+        )).firstMatch
     }
 
     private func waitForKeyboardFocus(

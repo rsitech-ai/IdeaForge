@@ -42,6 +42,14 @@ the same hostname validates and reuses the certificate and refreshes that
 key-free iPhone profile. A different hostname, incomplete files, a mismatched
 key, or an invalid certificate fails closed.
 
+CA certificates explicitly permit certificate signing and profile signatures.
+Certificate reuse requires strict X.509 chain validation. CAs created by older
+versions without a key-usage extension require a deliberate migration: keep the
+existing TLS directory, provision into a separate directory, install and verify
+the new root trust on each device, then switch the service certificate paths.
+The setup command reports `existing_tls_validation_failed` and leaves existing
+files unchanged; it never silently rotates an already trusted root.
+
 Install only `ideaforge-local-ca.mobileconfig` (or `ca.cert.pem`) on the iPhone
 and enable full trust for that root in iOS Certificate Trust Settings. Never export or copy `ca.key.pem` or
 `server.key.pem`. Compare the displayed SHA-256 server fingerprint with the
@@ -101,6 +109,11 @@ The app revisits unsuccessful supervision every 30 seconds while open. A failed
 worker session check clears the ready state and resumes readiness checks; it must
 not leave the toolbar claiming the backend is ready during an outage.
 
+The HTTP listener delegates TLS handshakes to connection workers and bounds
+socket reads to 30 seconds. An unfinished handshake cannot stop the listener
+from accepting other clients. JSON requests reject nonfinite numbers, malformed
+Unicode, excessive nesting, and invalid UTC revisions before persistence.
+
 Audio can arrive before its canonical recording metadata. Enrichment workers
 defer `workspace_recording_missing` for 30 seconds without consuming the three
 processing-failure attempts. Actual processing failures retain bounded retries.
@@ -116,6 +129,19 @@ iOS; it is not an immediate-delivery guarantee. The iPhone publishes compact
 title/status context to the Watch without transcript text. The current context
 contains the latest 24 Watch recording updates; older history after a long
 disconnection is not yet covered by an incremental catch-up protocol.
+
+Automatic pulls protect pending local uploads, but conflicting project content
+requires explicit review. Remote revisions are compared with the last applied
+remote cursor so a device clock ahead of the backend cannot discard an unseen
+project. Watch title/status projections have a device-local per-recording
+revision; late import receipts cannot downgrade an enriched recording.
+
+Mac downloads are temporary transcription inputs and are never saved as
+workspace-owned audio paths. Existing retained audio stays intact. Speech
+failures are published before a job becomes terminal so iPhone and Watch can
+show the diagnostic; unsuccessful publication remains retryable. Selecting
+Private mode during processing blocks outcome publication and leaves backend
+work retryable until synchronization is enabled again.
 
 New generated titles persist a provider identifier, source recording, SHA-256
 of the full source transcript, generation time, and the generated title value.

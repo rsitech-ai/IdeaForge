@@ -149,6 +149,14 @@ public struct MacRecordingEnrichmentProcessor: Sendable {
             if store.projects[location.projectIndex].recordings[location.recordingIndex].syncStatus == .ready {
                 return await publishAndComplete(job: job, store: store, now: now)
             }
+            let originalRecording = store.projects[location.projectIndex].recordings[location.recordingIndex]
+            if originalRecording.syncStatus == .failed,
+               originalRecording.processingDiagnostic?.isRetryable == false {
+                return await publishAndFail(
+                    job: job, store: store, now: now,
+                    diagnosticCode: "speech_processing_unavailable", retryable: false
+                )
+            }
 
             let stagedURL: URL
             do {
@@ -163,9 +171,13 @@ public struct MacRecordingEnrichmentProcessor: Sendable {
             }
             defer { try? FileManager.default.removeItem(at: stagedURL) }
 
-            store.projects[location.projectIndex].recordings[location.recordingIndex].localAudioPath = stagedURL.path
-            store.projects[location.projectIndex].recordings[location.recordingIndex].localFileStatus = .available
-
+            // Network staging suspends; revalidate identity before processing.
+            guard recordingLocation(for: job, in: store) != nil else {
+                return await fail(
+                    job: job, recordingID: job.recordingID,
+                    diagnosticCode: "workspace_recording_missing", retryable: true
+                )
+            }
             let heartbeat = Task {
                 while !Task.isCancelled {
                     try await Task.sleep(for: .seconds(120))
@@ -176,6 +188,7 @@ public struct MacRecordingEnrichmentProcessor: Sendable {
             let summary = await store.processLocalRecordingForSpeechTranscription(
                 recordingID: job.recordingID,
                 services: services,
+                stagedAudioURL: stagedURL,
                 now: now
             )
             heartbeat.cancel()
@@ -197,17 +210,6 @@ public struct MacRecordingEnrichmentProcessor: Sendable {
                     retryable: true
                 )
             }
-            store.projects[finalLocation.projectIndex].recordings[finalLocation.recordingIndex].localAudioPath = nil
-            store.projects[finalLocation.projectIndex].recordings[finalLocation.recordingIndex].localFileStatus = .uploaded
-            guard store.save(now: store.updatedAt) else {
-                return await fail(
-                    job: job,
-                    recordingID: job.recordingID,
-                    diagnosticCode: "workspace_persistence_failed",
-                    retryable: true
-                )
-            }
-
             if heartbeatFailed {
                 return await fail(
                     job: job,
@@ -220,9 +222,8 @@ public struct MacRecordingEnrichmentProcessor: Sendable {
                 let diagnostic = store.projects[finalLocation.projectIndex]
                     .recordings[finalLocation.recordingIndex]
                     .processingDiagnostic
-                return await fail(
-                    job: job,
-                    recordingID: job.recordingID,
+                return await publishAndFail(
+                    job: job, store: store, now: now,
                     diagnosticCode: diagnostic?.isRetryable == false
                         ? "speech_processing_unavailable"
                         : "speech_processing_failed",
@@ -237,6 +238,41 @@ public struct MacRecordingEnrichmentProcessor: Sendable {
                 retryable: true
             )
         }
+    }
+
+    @MainActor
+    private func publishAndFail(
+        job: BackendEnrichmentJob,
+        store: IdeaForgeStore,
+        now: Date,
+        diagnosticCode: String,
+        retryable: Bool
+    ) async -> MacRecordingEnrichmentResult {
+        do {
+            _ = try await backend.renew(jobID: job.jobID, leaseDurationSeconds: 300)
+            guard store.privacyMode != .privateLocal else {
+                return await fail(
+                    job: job, recordingID: job.recordingID,
+                    diagnosticCode: "workspace_sync_disabled", retryable: true
+                )
+            }
+            let publication = try await workspaceSynchronizer.pushLocalSnapshot(from: store, syncedAt: now)
+            guard publication.pushedLocalSnapshot, publication.acceptedLocalUpdatedAt != nil else {
+                return await fail(
+                    job: job, recordingID: job.recordingID,
+                    diagnosticCode: "workspace_publish_unconfirmed", retryable: true
+                )
+            }
+        } catch {
+            return await fail(
+                job: job, recordingID: job.recordingID,
+                diagnosticCode: "workspace_publish_failed", retryable: true
+            )
+        }
+        return await fail(
+            job: job, recordingID: job.recordingID,
+            diagnosticCode: diagnosticCode, retryable: retryable
+        )
     }
 
     @MainActor
@@ -258,6 +294,12 @@ public struct MacRecordingEnrichmentProcessor: Sendable {
             )
         }
         do {
+            guard store.privacyMode != .privateLocal else {
+                return await fail(
+                    job: job, recordingID: job.recordingID,
+                    diagnosticCode: "workspace_sync_disabled", retryable: true
+                )
+            }
             let publish = try await workspaceSynchronizer.pushLocalSnapshot(from: store, syncedAt: now)
             guard publish.pushedLocalSnapshot,
                   let acceptedLocalUpdatedAt = publish.acceptedLocalUpdatedAt else {
@@ -331,8 +373,7 @@ public struct MacRecordingEnrichmentProcessor: Sendable {
         if recording.syncStatus == .uploaded {
             return true
         }
-        return recording.syncStatus == .failed
-            && recording.processingDiagnostic?.isRetryable == true
+        return recording.syncStatus == .failed && recording.processingDiagnostic != nil
     }
 }
 

@@ -1,6 +1,9 @@
 import hashlib
 import http.client
 import json
+import socket
+import ssl
+import subprocess
 import sys
 import tempfile
 import threading
@@ -57,6 +60,8 @@ class RunningService:
         allowed_cidrs=("127.0.0.0/8",),
         rate_limit_policy: RateLimitPolicy | None = None,
         clock=None,
+        certificate_path=None,
+        private_key_path=None,
     ) -> None:
         self.clock = clock or MutableClock(NOW)
         self.database = LocalBackendDatabase(Path(temporary_directory) / "state" / "backend.sqlite3")
@@ -79,7 +84,10 @@ class RunningService:
             allowed_cidrs=allowed_cidrs,
             clock=self.clock,
         )
-        self.server = create_http_server("127.0.0.1", 0, application)
+        self.server = create_http_server(
+            "127.0.0.1", 0, application,
+            certificate_path=certificate_path, private_key_path=private_key_path,
+        )
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
 
@@ -143,6 +151,71 @@ class RunningService:
 
 
 class LocalBackendHTTPServiceTests(unittest.TestCase):
+    def test_unfinished_tls_handshake_does_not_block_other_clients(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            certificate = Path(temporary_directory) / "certificate.pem"
+            private_key = Path(temporary_directory) / "private-key.pem"
+            subprocess.run(
+                ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
+                 "-subj", "/CN=localhost", "-keyout", str(private_key), "-out", str(certificate)],
+                check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10,
+            )
+            service = RunningService(
+                temporary_directory, certificate_path=certificate, private_key_path=private_key
+            )
+            self.addCleanup(service.close)
+            context = ssl.create_default_context(cafile=str(certificate))
+            with socket.create_connection(("127.0.0.1", service.port), timeout=3):
+                connection = http.client.HTTPSConnection(
+                    "localhost", service.port, context=context, timeout=2
+                )
+                try:
+                    connection.request("GET", "/health/ready")
+                    response = connection.getresponse()
+                    self.assertEqual(response.status, 200)
+                    self.assertEqual(json.loads(response.read()), {"status": "ready"})
+                finally:
+                    connection.close()
+
+    def test_invalid_json_is_rejected_without_poisoning_workspace_or_losing_readiness(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            service = RunningService(temporary_directory)
+            self.addCleanup(service.close)
+            paired = service.pair()
+            headers = {
+                "Authorization": f"Bearer {paired['bearerToken']}",
+                "X-IdeaForge-Workspace-ID": WORKSPACE_ID,
+                "Content-Type": "application/json",
+            }
+            original = service.workspaces.load(WORKSPACE_ID)
+            for numeric_literal in ("NaN", "Infinity", "-Infinity", "1e400"):
+                with self.subTest(numeric_literal=numeric_literal):
+                    body = json.dumps(workspace_snapshot("2026-08-14T10:00:01Z")).encode()
+                    body = body[:-1] + b', "invalidNumber": ' + numeric_literal.encode() + b"}"
+                    status, payload = service.request_bytes("PUT", "/v1/workspace/snapshot", body, headers)
+                    self.assertEqual(status, 400)
+                    self.assertEqual(payload["error"], "invalid_workspace_snapshot")
+                    self.assertEqual(service.workspaces.load(WORKSPACE_ID), original)
+
+            invalid_bodies = (
+                b'{"nested":' + b"[" * 1100 + b"0" + b"]" * 1100 + b"}",
+                json.dumps({**workspace_snapshot("2026-08-14T10:00:01Z"), "title": "\ud800"}).encode(),
+                json.dumps(workspace_snapshot("0001-01-01T00:00:00+23:59")).encode(),
+            )
+            for index, body in enumerate(invalid_bodies):
+                with self.subTest(index=index):
+                    status, payload = service.request_bytes("PUT", "/v1/workspace/snapshot", body, headers)
+                    self.assertEqual(status, 400)
+                    self.assertEqual(payload["error"], "invalid_workspace_snapshot")
+                    self.assertEqual(service.workspaces.load(WORKSPACE_ID), original)
+            status, _, ready = service.request("GET", "/health/ready")
+            self.assertEqual((status, ready), (200, {"status": "ready"}))
+            status, _, _ = service.request(
+                "PUT", "/v1/workspace/snapshot",
+                workspace_snapshot("2026-08-14T10:00:02Z"), headers,
+            )
+            self.assertEqual(status, 200)
+
     def test_health_routes_are_content_free_and_ready(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             service = RunningService(temporary_directory)

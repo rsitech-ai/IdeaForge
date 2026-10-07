@@ -93,7 +93,7 @@ def _validate_existing(root: Path, hostname: str) -> None:
         if path.is_symlink() or not path.is_file():
             raise RuntimeError("TLS state is unsafe")
     _run(["openssl", "x509", "-in", str(root / "server.cert.pem"), "-noout", "-checkhost", hostname])
-    _run(["openssl", "verify", "-CAfile", str(root / "ca.cert.pem"), str(root / "server.cert.pem")])
+    _run(["openssl", "verify", "-x509_strict", "-CAfile", str(root / "ca.cert.pem"), str(root / "server.cert.pem")])
     certificate_key = _run(["openssl", "x509", "-in", str(root / "server.cert.pem"), "-pubkey", "-noout"])
     private_key = _run(["openssl", "pkey", "-in", str(root / "server.key.pem"), "-pubout"])
     if certificate_key != private_key:
@@ -121,6 +121,10 @@ def main() -> int:
             _validate_existing(root, hostname)
             _write_iphone_profile(root)
         except (OSError, RuntimeError):
+            print(json.dumps({
+                "error": "existing_tls_validation_failed",
+                "detail": "Existing TLS state needs review. Preserve it; provision a new CA in a separate directory and explicitly renew device trust before switching."
+            }, sort_keys=True, separators=(",", ":")))
             return 1
         report = _report(root, hostname, "existing")
         if args.install_mac_trust:
@@ -149,7 +153,9 @@ def main() -> int:
             encoding="utf-8",
         )
         _run(["openssl", "genpkey", "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:3072", "-out", str(ca_key)])
-        _run(["openssl", "req", "-x509", "-new", "-sha256", "-key", str(ca_key), "-days", "3650", "-subj", "/CN=IdeaForge Local CA", "-out", str(ca_cert)])
+        _run(["openssl", "req", "-x509", "-new", "-sha256", "-key", str(ca_key), "-days", "3650", "-subj", "/CN=IdeaForge Local CA",
+              "-addext", "basicConstraints=critical,CA:TRUE",
+              "-addext", "keyUsage=critical,digitalSignature,keyCertSign,cRLSign", "-out", str(ca_cert)])
         _run(["openssl", "genpkey", "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:3072", "-out", str(server_key)])
         _run(["openssl", "req", "-new", "-sha256", "-key", str(server_key), "-subj", f"/CN={hostname}", "-out", str(server_csr)])
         _run(["openssl", "x509", "-req", "-sha256", "-in", str(server_csr), "-CA", str(ca_cert), "-CAkey", str(ca_key), "-CAcreateserial", "-days", "397", "-extfile", str(extension), "-out", str(server_cert)])

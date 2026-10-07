@@ -384,6 +384,7 @@ enum WorkspaceSyncPayloadPolicy {
             project.recordings = project.recordings.map { recording in
                 var recording = recording
                 recording.localAudioPath = nil
+                recording.watchEnrichmentUpdatedAt = nil
                 recording.localFileStatus = recording.audioObjectKey == nil ? .missing : .uploaded
                 return recording
             }
@@ -418,9 +419,11 @@ enum WorkspaceSyncPayloadPolicy {
                 remoteRecordingIDs.insert(recording.id)
                 if let localRecording = localRecordings[recording.id] {
                     recording.localAudioPath = localRecording.localAudioPath
+                    recording.watchEnrichmentUpdatedAt = localRecording.watchEnrichmentUpdatedAt
                     recording.localFileStatus = localRecording.localFileStatus
                 } else {
                     recording.localAudioPath = nil
+                    recording.watchEnrichmentUpdatedAt = nil
                     recording.localFileStatus = recording.audioObjectKey == nil ? .missing : .uploaded
                 }
                 return recording

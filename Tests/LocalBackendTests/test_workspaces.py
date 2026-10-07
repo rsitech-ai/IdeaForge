@@ -52,6 +52,30 @@ def snapshot(updated_at: str, transcript: str = "Watch transcript") -> dict:
 
 
 class WorkspaceStoreTests(unittest.TestCase):
+    def test_publish_rejects_nonfinite_numbers_and_invalid_unicode_without_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            database, store = self.make_store(temporary_directory)
+            original = store.load(WORKSPACE_ID)
+            for index, value in enumerate((float("nan"), float("inf"), -float("inf"), "\ud800")):
+                invalid = snapshot("2026-08-14T09:00:01Z")
+                invalid["projects"][0]["recordings"][0]["durationSeconds"] = value
+                with self.subTest(index=index):
+                    with self.assertRaises(InvalidWorkspaceSnapshotError):
+                        store.publish(WORKSPACE_ID, invalid, f"invalid-number-{index}", NOW)
+                    self.assertEqual(store.load(WORKSPACE_ID), original)
+            with database.connection() as connection:
+                self.assertEqual(connection.execute("SELECT COUNT(*) FROM idempotency_receipts").fetchone()[0], 0)
+
+    def test_publish_rejects_revision_that_overflows_when_normalized_to_utc(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            _, store = self.make_store(temporary_directory)
+            with self.assertRaises(InvalidWorkspaceSnapshotError):
+                store.publish(
+                    WORKSPACE_ID, snapshot("0001-01-01T00:00:00+23:59"),
+                    "invalid-utc-revision", NOW,
+                )
+            self.assertEqual(store.load(WORKSPACE_ID)["updatedAt"], "1970-01-01T00:00:00Z")
+
     def make_store(self, temporary_directory: str, body_limit: int = 10 * 1024 * 1024):
         database = LocalBackendDatabase(Path(temporary_directory) / "state" / "backend.sqlite3")
         database.migrate()
