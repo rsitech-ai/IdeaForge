@@ -54,7 +54,10 @@ def _parse_revision(value: Any) -> datetime:
         raise InvalidWorkspaceSnapshotError("Workspace updatedAt must be ISO-8601") from error
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise InvalidWorkspaceSnapshotError("Workspace updatedAt must include a timezone")
-    return parsed.astimezone(UTC)
+    try:
+        return parsed.astimezone(UTC)
+    except (ValueError, OverflowError) as error:
+        raise InvalidWorkspaceSnapshotError("Workspace updatedAt is outside the supported range") from error
 
 
 def _validate_depth(value: object, depth: int = 0) -> None:
@@ -69,8 +72,13 @@ def _validate_depth(value: object, depth: int = 0) -> None:
 
 
 def _canonical_json(value: object) -> str:
+    _validate_depth(value)
     try:
-        return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        serialized = json.dumps(
+            value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
+        )
+        serialized.encode("utf-8")
+        return serialized
     except (TypeError, ValueError) as error:
         raise InvalidWorkspaceSnapshotError("Workspace snapshot must be valid JSON") from error
 
@@ -78,7 +86,6 @@ def _canonical_json(value: object) -> str:
 def _validated_snapshot(snapshot: object, body_limit_bytes: int) -> tuple[dict[str, Any], str]:
     if not isinstance(snapshot, dict):
         raise InvalidWorkspaceSnapshotError("Workspace snapshot must be a JSON object")
-    _validate_depth(snapshot)
     required_types: dict[str, type | tuple[type, ...]] = {
         "projects": list,
         "workflowTemplates": list,

@@ -4,6 +4,39 @@ import XCTest
 
 @MainActor
 final class MacRecordingEnrichmentProcessorTests: XCTestCase {
+    func testPrivateModeSelectedDuringLeaseRenewalBlocksOutcomePublication() async throws {
+        for status in [SyncStatus.ready, .failed] {
+            let store = SampleData.watchRelayStore(state: .received)
+            store.privacyMode = .standardCloud
+            store.projects[0].recordings[0].syncStatus = status
+            store.projects[0].recordings[0].audioObjectKey = "recordings/privacy.m4a"
+            if status == .failed {
+                store.projects[0].recordings[0].processingDiagnostic = .init(
+                    code: .transcriptionFailed, message: "Needs review", isRetryable: false, failedAt: SampleData.now
+                )
+            }
+            let recording = store.projects[0].recordings[0]
+            let backend = TestRecordingEnrichmentBackend(
+                job: .init(jobID: "job_privacy", recordingID: recording.id,
+                           ideaProjectID: recording.ideaProjectID, objectKey: "recordings/privacy.m4a",
+                           byteCount: 1, sha256: String(repeating: "a", count: 64), attemptCount: 1,
+                           leaseExpiresAt: Date().addingTimeInterval(300)),
+                audio: Data([1]), onRenew: { store.privacyMode = .privateLocal }
+            )
+            let synchronizer = TestWorkspaceSynchronizer(remoteUpdatedAt: store.updatedAt)
+            let processor = MacRecordingEnrichmentProcessor(
+                backend: backend, workspaceSynchronizer: synchronizer,
+                stagingDirectory: FileManager.default.temporaryDirectory
+            )
+            let result = await processor.processNext(in: store)
+            XCTAssertEqual(result, .failed(recordingID: recording.id,
+                                          diagnosticCode: "workspace_sync_disabled", retryable: true))
+            XCTAssertNil(synchronizer.publishedState)
+            let completed = await backend.completedJobID()
+            XCTAssertNil(completed)
+        }
+    }
+
     func testProcessorDoesNotPublishWhenItsLeaseCannotBeRenewed() async throws {
         let store = SampleData.watchRelayStore(state: .received)
         store.projects[0].recordings[0].syncStatus = .ready
@@ -53,15 +86,28 @@ final class MacRecordingEnrichmentProcessorTests: XCTestCase {
     }
 
     func testProcessorStagesEnrichesPublishesCompletesAndRemovesTemporaryAudio() async throws {
+        try await assertProcessorPreservesAudioOwnership(hasOriginalAudio: false)
+    }
+
+    func testProcessorRetainsOriginalLocalAudioAfterStagedEnrichment() async throws {
+        try await assertProcessorPreservesAudioOwnership(hasOriginalAudio: true)
+    }
+
+    private func assertProcessorPreservesAudioOwnership(hasOriginalAudio: Bool) async throws {
         let now = Date(timeIntervalSince1970: 20_000)
         let objectKey = "recordings/object-watch.m4a"
+        let originalURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("original-audio-\(UUID().uuidString).m4a")
+        defer { try? FileManager.default.removeItem(at: originalURL) }
+        if hasOriginalAudio { try Data("original".utf8).write(to: originalURL) }
         let recording = Recording(
             id: "rec_watch_mac",
             ideaProjectID: "idea_watch_mac",
             deviceName: "Apple Watch",
             durationSeconds: 14,
-            localFileStatus: .uploaded,
+            localFileStatus: hasOriginalAudio ? .available : .uploaded,
             syncStatus: .uploaded,
+            localAudioPath: hasOriginalAudio ? originalURL.path : nil,
             audioObjectKey: objectKey,
             languageHint: "en",
             createdAt: now,
@@ -89,6 +135,7 @@ final class MacRecordingEnrichmentProcessorTests: XCTestCase {
             validationExperiments: [],
             codexTasks: []
         )
+        let repository = AudioCheckpointRepository()
         let store = IdeaForgeStore(
             projects: [project],
             workflowTemplates: DefaultWorkflows.templates,
@@ -100,7 +147,8 @@ final class MacRecordingEnrichmentProcessorTests: XCTestCase {
                 lastRemoteWorkspaceUpdatedAt: now,
                 failingItems: 0
             ),
-            updatedAt: now
+            updatedAt: now,
+            repository: repository
         )
         let audio = Data("mac-stage-audio".utf8)
         let backend = TestRecordingEnrichmentBackend(
@@ -149,6 +197,7 @@ final class MacRecordingEnrichmentProcessorTests: XCTestCase {
             result,
             .completed(recordingID: recording.id, title: "Private Focus Sessions")
         )
+        XCTAssertEqual(repository.savedAudioPaths(), Set([hasOriginalAudio ? originalURL.path : "nil"]))
         XCTAssertEqual(store.projects.first?.title, "Private Focus Sessions")
         XCTAssertEqual(
             store.projects.first?.transcript.cleanText,
@@ -156,7 +205,8 @@ final class MacRecordingEnrichmentProcessorTests: XCTestCase {
         )
         XCTAssertEqual(store.projects.first?.recordings.first?.syncStatus, .ready)
         XCTAssertEqual(store.projects.first?.recordings.first?.localFileStatus, .uploaded)
-        XCTAssertNil(store.projects.first?.recordings.first?.localAudioPath)
+        XCTAssertEqual(store.projects.first?.recordings.first?.localAudioPath, hasOriginalAudio ? originalURL.path : nil)
+        if hasOriginalAudio { XCTAssertEqual(try Data(contentsOf: originalURL), Data("original".utf8)) }
         let completedJobID = await backend.completedJobID()
         let failedJob = await backend.failedJob()
         XCTAssertEqual(completedJobID, "job_watch_mac")
@@ -174,7 +224,9 @@ final class MacRecordingEnrichmentProcessorTests: XCTestCase {
         XCTAssertNotNil(provenance["generatedAt"])
         let decoded = try JSONDecoder().decode(IdeaProject.self, from: projectData)
         XCTAssertEqual(decoded, published?.projects.first)
-        XCTAssertNil(published?.projects.first?.recordings.first?.localAudioPath)
+        XCTAssertNil(WorkspaceSyncPayloadPolicy.outboundState(
+            from: try XCTUnwrap(published)
+        ).projects.first?.recordings.first?.localAudioPath)
         XCTAssertEqual(
             (try? FileManager.default.contentsOfDirectory(at: stagingDirectory, includingPropertiesForKeys: nil)) ?? [],
             []
@@ -197,6 +249,42 @@ final class MacRecordingEnrichmentProcessorTests: XCTestCase {
         XCTAssertEqual(result, .idle)
         let stageCount = await backend.stageCount()
         XCTAssertEqual(stageCount, 0)
+    }
+
+    func testProcessorPublishesPermanentSpeechFailureBeforeTerminatingBackendWork() async throws {
+        let store = SampleData.watchRelayStore(state: .received)
+        store.privacyMode = .standardCloud
+        store.projects[0].recordings[0].syncStatus = .uploaded
+        store.projects[0].recordings[0].audioObjectKey = "recordings/unavailable.m4a"
+        let recording = store.projects[0].recordings[0]
+        let backend = TestRecordingEnrichmentBackend(job: .init(
+            jobID: "job_unavailable", recordingID: recording.id, ideaProjectID: recording.ideaProjectID,
+            objectKey: "recordings/unavailable.m4a", byteCount: 1,
+            sha256: String(repeating: "a", count: 64), attemptCount: 1,
+            leaseExpiresAt: Date().addingTimeInterval(300)
+        ), audio: Data([1]))
+        let synchronizer = TestWorkspaceSynchronizer(remoteUpdatedAt: store.updatedAt)
+        let staging = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: staging) }
+        let processor = MacRecordingEnrichmentProcessor(
+            backend: backend, workspaceSynchronizer: synchronizer,
+            services: .init(
+                transcription: UnavailableMacSpeechService(),
+                workflow: LocalWorkflowExecutionService(), syncQueue: LocalSyncQueueService(),
+                export: LocalExportService()
+            ), stagingDirectory: staging
+        )
+        let result = await processor.processNext(in: store)
+        XCTAssertEqual(result, .failed(
+            recordingID: recording.id, diagnosticCode: "speech_processing_unavailable", retryable: false
+        ))
+        XCTAssertEqual(synchronizer.publishedState?.projects[0].recordings[0].syncStatus, .failed)
+        XCTAssertEqual(synchronizer.publishedState?.projects[0].recordings[0].processingDiagnostic?.isRetryable, false)
+        XCTAssertEqual(WatchEnrichmentProjection(
+            projects: try XCTUnwrap(synchronizer.publishedState).projects
+        ).items.first?.state, .needsAttention)
+        let failedJob = await backend.failedJob()
+        XCTAssertEqual(failedJob, "job_unavailable")
     }
 
     func testProcessorResumesClaimedRetryableCheckpointWhenTransientPublishIsBlocked() async throws {
@@ -342,11 +430,14 @@ private actor TestRecordingEnrichmentBackend: BackendRecordingEnrichmentServing 
     private var completedID: String?
     private var failure: (String, String, Bool)?
     private let rejectsRenewal: Bool
+    private let onRenew: (@MainActor @Sendable () -> Void)?
 
-    init(job: BackendEnrichmentJob?, audio: Data, rejectsRenewal: Bool = false) {
+    init(job: BackendEnrichmentJob?, audio: Data, rejectsRenewal: Bool = false,
+         onRenew: (@MainActor @Sendable () -> Void)? = nil) {
         self.job = job
         self.audio = audio
         self.rejectsRenewal = rejectsRenewal
+        self.onRenew = onRenew
     }
 
     func claimNextJob(leaseDurationSeconds: Int) async throws -> BackendEnrichmentJob? {
@@ -368,6 +459,7 @@ private actor TestRecordingEnrichmentBackend: BackendRecordingEnrichmentServing 
 
     func renew(jobID: String, leaseDurationSeconds: Int) async throws -> BackendEnrichmentLeaseReceipt {
         if rejectsRenewal { throw URLError(.networkConnectionLost) }
+        await onRenew?()
         return BackendEnrichmentLeaseReceipt(
             jobID: jobID,
             status: "running",
@@ -438,6 +530,12 @@ private struct TestMacTranscriptionService: TranscriptionService {
     }
 }
 
+private struct UnavailableMacSpeechService: TranscriptionService {
+    func transcript(for recording: Recording, hint: String) async throws -> Transcript {
+        throw LocalSpeechTranscriptionError.onDeviceRecognitionUnavailable
+    }
+}
+
 private struct TestMacTitleGenerator: IdeaTitleGenerating {
     var title: String
 
@@ -447,5 +545,21 @@ private struct TestMacTitleGenerator: IdeaTitleGenerating {
 
     func generateTitle(for request: IdeaTitleGenerationRequest) async throws -> IdeaTitleGenerationResult {
         IdeaTitleGenerationResult(title: title)
+    }
+}
+
+private final class AudioCheckpointRepository: WorkspaceRepository, @unchecked Sendable {
+    private let lock = NSLock()
+    private var paths: Set<String> = []
+    func load() throws -> WorkspaceState? { nil }
+    func save(_ state: WorkspaceState) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        paths.insert(state.projects.first?.recordings.first?.localAudioPath ?? "nil")
+    }
+    func savedAudioPaths() -> Set<String> {
+        lock.lock()
+        defer { lock.unlock() }
+        return paths
     }
 }

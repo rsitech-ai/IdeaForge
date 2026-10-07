@@ -19,7 +19,7 @@ The project does not include a hosted production service. The production-local b
 
 Official Mac builds are distributed outside the Mac App Store through the [GitHub Releases page](https://github.com/rsitech-ai/IdeaForge/releases). An official binary must carry the maintainer's Developer ID signature, an Apple notarization ticket, a stapled ticket on the app and DMG, and the release workflow's provenance. If the Releases page has no DMG with that evidence, build from source.
 
-IdeaForge checks for Mac updates with Sparkle 2.9.4. The app verifies update metadata with its embedded EdDSA public key. A GitHub signature, a Developer ID signature, an Apple notarization ticket, and a Sparkle signature prove different parts of the release chain; see [docs/RELEASING.md](docs/RELEASING.md).
+IdeaForge checks for Mac updates with Sparkle 2.9.6. The app verifies update metadata with its embedded EdDSA public key. A GitHub signature, a Developer ID signature, an Apple notarization ticket, and a Sparkle signature prove different parts of the release chain; see [docs/RELEASING.md](docs/RELEASING.md).
 
 ## Build from source
 

@@ -34,6 +34,7 @@ from .recordings import (
 )
 from .rate_limits import PersistentRateLimiter, RateLimitPolicy
 from .workspaces import (
+    _canonical_json,
     IdempotencyConflictError,
     InvalidWorkspaceSnapshotError,
     WorkspaceRevisionConflictError,
@@ -155,11 +156,34 @@ class _ThreadingHTTPServer(http.server.ThreadingHTTPServer):
         self.application = application
         super().__init__(server_address, _LocalBackendRequestHandler)
 
+    def get_request(self):
+        request, address = super().get_request()
+        request.settimeout(30)
+        return request, address
+
+    def process_request_thread(self, request, client_address) -> None:
+        # The accepting thread must stay available while a peer negotiates TLS.
+        if isinstance(request, ssl.SSLSocket):
+            try:
+                request.do_handshake()
+            except OSError:
+                self.shutdown_request(request)
+                return
+        super().process_request_thread(request, client_address)
+
 
 class _LocalBackendRequestHandler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "IdeaForgeLocalBackend"
     sys_version = ""
+
+    def handle(self) -> None:
+        try:
+            super().handle()
+        except (TimeoutError, ConnectionError, ssl.SSLError):
+            # Incomplete requests and disconnected clients are transport
+            # failures; never print a request or credential-bearing traceback.
+            self.close_connection = True
 
     @property
     def application(self) -> LocalBackendApplication:
@@ -250,8 +274,12 @@ class _LocalBackendRequestHandler(http.server.BaseHTTPRequestHandler):
         if len(body) != content_length:
             raise InvalidWorkspaceSnapshotError("Request body was incomplete")
         try:
-            return json.loads(body)
-        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            payload = json.loads(body)
+            # Python's decoder accepts non-finite numbers and lone surrogates;
+            # neither can be synchronized as interoperable UTF-8 JSON.
+            _canonical_json(payload)
+            return payload
+        except (ValueError, RecursionError) as error:
             raise InvalidWorkspaceSnapshotError("Request body must be valid JSON") from error
 
     def _content_length(self, maximum_bytes: int) -> int:
@@ -647,9 +675,7 @@ class _LocalBackendRequestHandler(http.server.BaseHTTPRequestHandler):
             return
         try:
             payload = self._read_json(self.application.workspaces.body_limit_bytes)
-            canonical_request = json.dumps(
-                payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
-            ).encode("utf-8")
+            canonical_request = _canonical_json(payload).encode("utf-8")
             idempotency_key = self.headers.get("Idempotency-Key", "").strip()
             if not idempotency_key:
                 idempotency_key = "workspace-" + hashlib.sha256(canonical_request).hexdigest()
@@ -698,5 +724,7 @@ def create_http_server(
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.minimum_version = ssl.TLSVersion.TLSv1_2
         context.load_cert_chain(str(certificate_path), str(private_key_path))
-        server.socket = context.wrap_socket(server.socket, server_side=True)
+        server.socket = context.wrap_socket(
+            server.socket, server_side=True, do_handshake_on_connect=False
+        )
     return server

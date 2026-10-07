@@ -1078,6 +1078,7 @@ struct SettingsView: View {
                 .accessibilityIdentifier("mac.settings.backendConnectionKind")
                 TextField("Base URL", text: $backendSettings.baseURLString)
                     .textFieldStyle(.roundedBorder)
+                    .accessibilityIdentifier("mac.settings.backendBaseURL")
                 TextField("Workspace ID", text: $backendSettings.workspaceID)
                     .textFieldStyle(.roundedBorder)
                 TextField("Auth session path", text: $backendSettings.authSessionPath)

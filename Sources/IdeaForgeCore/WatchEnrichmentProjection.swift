@@ -113,15 +113,21 @@ extension IdeaForgeStore {
 
         for item in projection.items {
             guard let projectIndex = projects.firstIndex(where: { $0.id == item.ideaProjectID }),
-                  item.updatedAt >= projects[projectIndex].updatedAt,
                   let recordingIndex = projects[projectIndex].recordings.firstIndex(where: {
                       $0.id == item.recordingID
                           && $0.deviceName.localizedCaseInsensitiveContains("watch")
-                  }) else {
+                  }),
+                  projects[projectIndex].recordings[recordingIndex].watchEnrichmentUpdatedAt.map({
+                      item.updatedAt > $0
+                  }) ?? true else {
                 continue
             }
 
-            projects[projectIndex].title = item.title.trimmingCharacters(in: .whitespacesAndNewlines)
+            let latestTitleRevision = projects[projectIndex].recordings
+                .compactMap(\.watchEnrichmentUpdatedAt).max()
+            if latestTitleRevision.map({ item.updatedAt > $0 }) ?? true {
+                projects[projectIndex].title = item.title.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
             let event: RecordingQueueEvent? = switch item.state {
             case .ready: .ready
             case .processing: .transcribing
@@ -136,6 +142,7 @@ extension IdeaForgeStore {
                 projects[projectIndex].recordings[recordingIndex] = recording
             }
             projects[projectIndex].updatedAt = max(projects[projectIndex].updatedAt, item.updatedAt)
+            projects[projectIndex].recordings[recordingIndex].watchEnrichmentUpdatedAt = item.updatedAt
             appliedCount += 1
         }
 

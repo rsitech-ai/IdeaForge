@@ -88,7 +88,7 @@ DETERMINISTIC_TEXT_FIXTURES = frozenset(
 # Upstream legal text must remain verbatim, including author contact details.
 # The exact hash prevents this narrow exception from masking edited content.
 VERBATIM_THIRD_PARTY_LICENSES = {
-    "ThirdPartyLicenses/Sparkle-2.9.4-LICENSE.txt":
+    "ThirdPartyLicenses/Sparkle-2.9.6-LICENSE.txt":
         "389a4e4e9a32f059775b13a06e25a591445ba229d2838d26dd3e7c0c45127cfe",
 }
 

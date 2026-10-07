@@ -40,7 +40,7 @@ also configured.
 
 - Add an official, immutable dependency-submission path for the Xcode project's
   generated `Package.resolved`, then verify Sparkle revision
-  `b6496a74a087257ef5e6da1c5b29a447a60f5bd7` appears in the dependency graph.
+  `ac2def288cbff5cfc7df3ffef6abdf45b72bcb0a` appears in the dependency graph.
 - Enable a supported Swift code-scanning configuration and confirm that an
   analysis for the exact release commit completes. Do not treat “no analysis”
   as “no findings.”

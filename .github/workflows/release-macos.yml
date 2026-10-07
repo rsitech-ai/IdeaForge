@@ -173,14 +173,14 @@ jobs:
           set -euo pipefail
           : "${SPARKLE_ED25519_PRIVATE_KEY:?Missing Sparkle EdDSA private key secret}"
           umask 077
-          sparkle_archive="$RUNNER_TEMP/Sparkle-2.9.4.tar.xz"
-          sparkle_root="$RUNNER_TEMP/Sparkle-2.9.4"
+          sparkle_archive="$RUNNER_TEMP/Sparkle-2.9.6.tar.xz"
+          sparkle_root="$RUNNER_TEMP/Sparkle-2.9.6"
           sparkle_key="$RUNNER_TEMP/ideaforge-sparkle-private-key"
           appcast_work="$RUNNER_TEMP/ideaforge-appcast"
           curl -fsSL --proto '=https' --tlsv1.2 \
-            https://github.com/sparkle-project/Sparkle/releases/download/2.9.4/Sparkle-2.9.4.tar.xz \
+            https://github.com/sparkle-project/Sparkle/releases/download/2.9.6/Sparkle-2.9.6.tar.xz \
             -o "$sparkle_archive"
-          printf 'ce89daf967db1e1893ed3ebd67575ed82d3902563e3191ca92aaec9164fbdef9  %s\n' "$sparkle_archive" \
+          printf '52bf9e88cdd972fc0c81501377a880e90d47031bd8ca5462488f843e2609e192  %s\n' "$sparkle_archive" \
             | shasum -a 256 -c -
           mkdir -p "$sparkle_root" "$appcast_work"
           tar -xJf "$sparkle_archive" -C "$sparkle_root"

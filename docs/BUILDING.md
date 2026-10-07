@@ -12,7 +12,7 @@ The release branch is verified with:
 | macOS deployment target | 14.0 |
 | iOS deployment target | 17.0 |
 | watchOS deployment target | 10.0 |
-| Sparkle | 2.9.4, exact package pin |
+| Sparkle | 2.9.6, exact package pin |
 
 Newer compatible tools may work, but they do not replace verification on this matrix.
 

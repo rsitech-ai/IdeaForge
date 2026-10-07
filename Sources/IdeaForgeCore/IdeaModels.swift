@@ -447,6 +447,8 @@ public struct Recording: Identifiable, Codable, Hashable, Sendable {
     public var createdAt: Date
     public var markerOffsets: [Int]
     public var processingDiagnostic: RecordingProcessingDiagnostic?
+    /// Device-local revision of the last accepted Watch return projection.
+    public var watchEnrichmentUpdatedAt: Date?
 
     public init(
         id: String,
@@ -460,7 +462,8 @@ public struct Recording: Identifiable, Codable, Hashable, Sendable {
         languageHint: String,
         createdAt: Date,
         markerOffsets: [Int],
-        processingDiagnostic: RecordingProcessingDiagnostic? = nil
+        processingDiagnostic: RecordingProcessingDiagnostic? = nil,
+        watchEnrichmentUpdatedAt: Date? = nil
     ) {
         self.id = id
         self.ideaProjectID = ideaProjectID
@@ -474,6 +477,7 @@ public struct Recording: Identifiable, Codable, Hashable, Sendable {
         self.createdAt = createdAt
         self.markerOffsets = markerOffsets
         self.processingDiagnostic = processingDiagnostic
+        self.watchEnrichmentUpdatedAt = watchEnrichmentUpdatedAt
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -489,6 +493,7 @@ public struct Recording: Identifiable, Codable, Hashable, Sendable {
         case createdAt
         case markerOffsets
         case processingDiagnostic
+        case watchEnrichmentUpdatedAt
     }
 
     public init(from decoder: Decoder) throws {
@@ -508,6 +513,7 @@ public struct Recording: Identifiable, Codable, Hashable, Sendable {
             RecordingProcessingDiagnostic.self,
             forKey: .processingDiagnostic
         )
+        watchEnrichmentUpdatedAt = try container.decodeIfPresent(Date.self, forKey: .watchEnrichmentUpdatedAt)
     }
 }
 
@@ -2528,7 +2534,13 @@ public final class IdeaForgeStore {
 
     @discardableResult
     public func markRecordingTransferredToIPhone(recordingID: String, now: Date = Date()) -> Bool {
-        guard recording(withID: recordingID) != nil else { return false }
+        guard let recording = recording(withID: recordingID) else { return false }
+        // Import receipts and enrichment use independent WC delivery channels.
+        // A late receipt must not replace a newer processing outcome or revision.
+        if (recording.syncStatus == .failed && recording.watchEnrichmentUpdatedAt != nil)
+            || [.uploaded, .transcribing, .ready].contains(recording.syncStatus) {
+            return true
+        }
         let originalState = workspaceState()
         updateRecording(recordingID: recordingID, event: .transferredToIPhone, now: now)
         syncHealth.queuedUploads = activeUploadJobs.count
@@ -2543,7 +2555,11 @@ public final class IdeaForgeStore {
 
     @discardableResult
     public func markRecordingWatchTransferFailed(recordingID: String, now: Date = Date()) -> Bool {
-        guard recording(withID: recordingID) != nil else { return false }
+        guard let recording = recording(withID: recordingID) else { return false }
+        if (recording.syncStatus == .failed && recording.watchEnrichmentUpdatedAt != nil)
+            || [.uploaded, .transcribing, .ready].contains(recording.syncStatus) {
+            return true
+        }
         let originalState = workspaceState()
         updateRecording(recordingID: recordingID, event: .watchTransferFailed, now: now)
         IdeaForgeLog.sync.error("Watch recording transfer delivery failed; recording: \(recordingID, privacy: .private)")
@@ -2642,10 +2658,25 @@ public final class IdeaForgeStore {
     public func processLocalRecordingForSpeechTranscription(
         recordingID: String,
         services: IdeaForgeServices = .localSpeech,
+        stagedAudioURL: URL? = nil,
         now: Date = Date()
     ) async -> AIProcessingSummary {
-        let candidates = localSpeechTranscriptionCandidates(maxRecordingsPerRun: Int.max)
-            .filter { $0.id == recordingID }
+        let candidates: [Recording]
+        if let stagedAudioURL {
+            // A backend download is a transient input, never a workspace-owned
+            // path. Checkpoints retain the recording's original audio ownership.
+            guard stagedAudioURL.isFileURL,
+                  FileManager.default.fileExists(atPath: stagedAudioURL.path),
+                  var recording = projects.flatMap(\.recordings).first(where: { $0.id == recordingID }),
+                  recording.syncStatus != .ready,
+                  recording.syncStatus != .transcribing else { return AIProcessingSummary() }
+            recording.localAudioPath = stagedAudioURL.path
+            recording.localFileStatus = .available
+            candidates = [recording]
+        } else {
+            candidates = localSpeechTranscriptionCandidates(maxRecordingsPerRun: Int.max)
+                .filter { $0.id == recordingID }
+        }
         return await processLocalSpeechTranscriptionCandidates(
             candidates,
             services: services,
@@ -2812,7 +2843,14 @@ public final class IdeaForgeStore {
             isResolvingKnownConflict = syncHealth.syncConflictStatus != nil
                 && syncHealth.lastRemoteWorkspaceUpdatedAt == remoteState.updatedAt
         }
-        guard isInitialHydration || isResolvingKnownConflict || remoteState.updatedAt > updatedAt else {
+        let hasUnseenRemoteRevision = syncHealth.lastRemoteWorkspaceUpdatedAt.map {
+            remoteState.updatedAt > $0
+        } ?? false
+        let localState = workspaceState()
+        let conflictReport = WorkspaceSyncConflictReport.report(
+            localState: localState, remoteState: remoteState
+        )
+        guard isInitialHydration || isResolvingKnownConflict || hasUnseenRemoteRevision else {
             syncHealth.lastSuccessfulSync = syncedAt
             syncHealth.lastRemoteWorkspaceUpdatedAt = max(
                 syncHealth.lastRemoteWorkspaceUpdatedAt ?? remoteState.updatedAt,
@@ -2827,20 +2865,21 @@ public final class IdeaForgeStore {
             return false
         }
 
-        let localState = workspaceState()
-        if let conflictReport = WorkspaceSyncConflictReport.report(
-            localState: localState,
-            remoteState: remoteState
-        ) {
+        if let conflictReport {
             switch conflictResolution {
             case .preserveLocalUploadWork:
-                try applyMergedRemoteSnapshot(
-                    remoteState,
-                    preserving: .preserveAll(report: conflictReport),
-                    from: localState,
-                    syncedAt: syncedAt
-                )
-                return true
+                // Protect pending files automatically, but content differences
+                // require review: a workspace timestamp cannot identify which
+                // device owns the newer title or transcript.
+                if conflictReport.projectContentConflicts.isEmpty {
+                    try applyMergedRemoteSnapshot(
+                        remoteState,
+                        preserving: .preserveAll(report: conflictReport),
+                        from: localState,
+                        syncedAt: syncedAt
+                    )
+                    return true
+                }
             case .preserveReviewedLocalWork(let selection):
                 try applyMergedRemoteSnapshot(
                     remoteState,

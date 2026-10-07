@@ -4,6 +4,93 @@ import XCTest
 
 @MainActor
 final class WatchEnrichmentProjectionTests: XCTestCase {
+    func testLateImportAcknowledgementDoesNotDowngradeEnrichedRecording() throws {
+        for state in [WatchEnrichmentState.processing, .ready, .needsAttention] {
+            let store = SampleData.watchRelayStore(state: .received)
+            let project = try XCTUnwrap(store.projects.first)
+            let recording = try XCTUnwrap(project.recordings.first)
+            let revision = project.updatedAt.addingTimeInterval(60)
+            let projection = WatchEnrichmentProjection(
+                items: [.init(recordingID: recording.id, ideaProjectID: project.id,
+                              title: "Enriched capture", state: state, updatedAt: revision)],
+                updatedAt: revision
+            )
+            XCTAssertEqual(store.apply(projection), 1)
+            let enrichedStatus = store.projects[0].recordings[0].syncStatus
+            XCTAssertTrue(store.markRecordingTransferredToIPhone(
+                recordingID: recording.id, now: revision.addingTimeInterval(1)
+            ))
+            XCTAssertEqual(store.projects[0].recordings[0].syncStatus, enrichedStatus)
+            XCTAssertEqual(store.projects[0].title, "Enriched capture")
+            XCTAssertEqual(store.projects[0].updatedAt, revision)
+        }
+    }
+
+    func testImportReceiptWithAheadClockDoesNotRejectFirstRemoteProjection() throws {
+        let store = SampleData.watchRelayStore(state: .received)
+        let recording = try XCTUnwrap(store.projects.first?.recordings.first)
+        let revision = store.projects[0].updatedAt.addingTimeInterval(60)
+        XCTAssertTrue(store.markRecordingTransferredToIPhone(recordingID: recording.id,
+                                                            now: revision.addingTimeInterval(600)))
+        let projection = WatchEnrichmentProjection(
+            items: [.init(recordingID: recording.id, ideaProjectID: recording.ideaProjectID,
+                          title: "Remote title", state: .ready, updatedAt: revision)],
+            updatedAt: revision
+        )
+        XCTAssertEqual(store.apply(projection), 1)
+        XCTAssertEqual(store.projects[0].recordings[0].syncStatus, .ready)
+        let persisted = try JSONDecoder().decode(WorkspaceState.self,
+                                                from: JSONEncoder().encode(store.workspaceState()))
+        XCTAssertEqual(persisted.projects[0].recordings[0].watchEnrichmentUpdatedAt, revision)
+        let outbound = WorkspaceSyncPayloadPolicy.outboundState(from: persisted)
+        XCTAssertNil(outbound.projects[0].recordings[0].watchEnrichmentUpdatedAt)
+        let restored = IdeaForgeStore(state: persisted)
+        var stale = projection
+        stale.items[0].updatedAt = revision.addingTimeInterval(-1)
+        stale.items[0].state = .waiting
+        XCTAssertEqual(restored.apply(stale), 0)
+        XCTAssertEqual(restored.projects[0].recordings[0].syncStatus, .ready)
+    }
+
+    func testEqualRevisionReplayCannotDowngradeStatusOrReplaceTitle() throws {
+        let store = SampleData.watchRelayStore(state: .received)
+        let recording = try XCTUnwrap(store.projects.first?.recordings.first)
+        let revision = store.projects[0].updatedAt.addingTimeInterval(60)
+        var projection = WatchEnrichmentProjection(
+            items: [.init(recordingID: recording.id, ideaProjectID: recording.ideaProjectID,
+                          title: "Final title", state: .ready, updatedAt: revision)],
+            updatedAt: revision
+        )
+        XCTAssertEqual(store.apply(projection), 1)
+        projection.items[0].state = .processing
+        projection.items[0].title = "Stale title"
+        XCTAssertEqual(store.apply(projection), 0)
+        XCTAssertEqual(store.projects[0].recordings[0].syncStatus, .ready)
+        XCTAssertEqual(store.projects[0].title, "Final title")
+    }
+
+    func testOlderOtherRecordingUpdatesItsStatusWithoutReplacingSharedTitle() throws {
+        let store = SampleData.watchRelayStore(state: .received)
+        let recording = try XCTUnwrap(store.projects.first?.recordings.first)
+        var second = recording
+        second.id = "rec_second_projection"
+        store.projects[0].recordings.append(second)
+        let revision = store.projects[0].updatedAt.addingTimeInterval(60)
+        let projection = WatchEnrichmentProjection(
+            items: [
+                .init(recordingID: recording.id, ideaProjectID: recording.ideaProjectID,
+                      title: "Newest shared title", state: .ready, updatedAt: revision),
+                .init(recordingID: second.id, ideaProjectID: second.ideaProjectID,
+                      title: "Older shared title", state: .processing,
+                      updatedAt: revision.addingTimeInterval(-1))
+            ], updatedAt: revision
+        )
+        XCTAssertEqual(store.apply(projection), 2)
+        XCTAssertEqual(store.projects[0].title, "Newest shared title")
+        XCTAssertEqual(store.projects[0].recordings[0].syncStatus, .ready)
+        XCTAssertEqual(store.projects[0].recordings.last?.syncStatus, .transcribing)
+    }
+
     func testProjectionContainsOnlyWatchTitleAndProcessingState() throws {
         let now = Date(timeIntervalSince1970: 20_000)
         let recording = Recording(

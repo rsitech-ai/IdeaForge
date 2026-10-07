@@ -44,9 +44,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             window.setFrame(NSRect(origin: targetOrigin, size: targetSize), display: true)
             window.contentView?.layoutSubtreeIfNeeded()
             window.contentView?.displayIfNeeded()
-            if arguments.contains("-uiTestingWideWindow") {
-                window.setAccessibilityIdentifier("mac.uiTesting.windowPreset.wide.applied")
-            }
+            let preset = arguments.contains("-uiTestingWideWindow") ? "wide"
+                : (arguments.contains("-uiTestingCompactWindow") ? "compact" : "default")
+            window.setAccessibilityIdentifier("mac.uiTesting.windowPreset.\(preset).applied")
         }
     }
 }

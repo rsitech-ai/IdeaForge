@@ -29,7 +29,6 @@ struct MacContentView: View {
     @State private var isRecording = false
     @State private var isInspectorPresented = false
     @State private var workspaceDetailWidth: CGFloat = 0
-    @State private var inboxRecoveryFocus: InboxStatusAction?
 
     private var filteredProjects: [IdeaProject] {
         guard !query.isEmpty else { return store.projects }
@@ -61,12 +60,10 @@ struct MacContentView: View {
         } set: { newValue in
             guard let newValue else { return }
             if let projectID = newValue.removingPrefix("project:") {
-                inboxRecoveryFocus = nil
                 store.selectedProjectID = projectID
                 selectedSection = .ideas
             } else if let sectionName = newValue.removingPrefix("section:"),
                       let section = SidebarSection(rawValue: sectionName) {
-                inboxRecoveryFocus = nil
                 selectedSection = section
                 store.selectedProjectID = nil
             }
@@ -97,7 +94,7 @@ struct MacContentView: View {
                         openSettings()
                     } label: {
                         Label(
-                            "Local Backend",
+                            backendLifecycle.statusMessage,
                             systemImage: backendLifecycle.isReady
                                 ? "server.rack"
                                 : (backendLifecycle.isChecking ? "arrow.triangle.2.circlepath" : "server.rack")
@@ -105,14 +102,12 @@ struct MacContentView: View {
                     }
                     .labelStyle(.iconOnly)
                     .accessibilityIdentifier("mac.toolbar.localBackendStatus")
-                    .accessibilityLabel("Local Backend")
-                    .accessibilityValue(backendLifecycle.statusMessage)
+                    .accessibilityHint("Open Local Backend settings")
                     .help(backendLifecycle.statusMessage)
                 }
                 Button {
                     store.selectedProjectID = nil
                     selectedSection = .inbox
-                    inboxRecoveryFocus = nil
                 } label: {
                     Label("Inbox", systemImage: "tray")
                 }
@@ -345,7 +340,6 @@ struct MacContentView: View {
                 workflows: store.workflowTemplates,
                 queuedRecordings: store.queuedRecordings,
                 questions: store.pendingQuestions,
-                inboxRecoveryFocus: inboxRecoveryFocus,
                 retryableRecordingIDs: Set(
                     store.queuedRecordings.lazy
                         .filter { store.canRetryUpload(recordingID: $0.id) }
@@ -357,7 +351,6 @@ struct MacContentView: View {
                 onShowInbox: {
                     store.selectedProjectID = nil
                     selectedSection = .inbox
-                    inboxRecoveryFocus = nil
                 }
             )
         }
@@ -386,7 +379,6 @@ struct MacContentView: View {
             openSettings()
             return
         }
-        inboxRecoveryFocus = action
         store.selectedProjectID = nil
         selectedSection = .inbox
     }
@@ -613,11 +605,11 @@ struct SidebarView: View {
             } label: {
                 Label("Tools", systemImage: "wrench.and.screwdriver")
                     .font(.body.weight(.medium))
+                    .accessibilityIdentifier("mac.sidebar.tools")
+                    .accessibilityLabel("Tools")
+                    .accessibilityValue(isToolsExpanded ? "Expanded" : "Collapsed")
+                    .accessibilityHint("Shows Workflows, Templates, Exports, and Integrations")
             }
-            .accessibilityIdentifier("mac.sidebar.tools")
-            .accessibilityLabel("Tools")
-            .accessibilityValue(isToolsExpanded ? "Expanded" : "Collapsed")
-            .accessibilityHint("Shows Workflows, Templates, Exports, and Integrations")
         }
         .listStyle(.sidebar)
         .focusSection()
@@ -700,7 +692,6 @@ struct WorkspaceSectionView: View {
     var workflows: [WorkflowTemplate]
     var queuedRecordings: [Recording]
     var questions: [Question]
-    var inboxRecoveryFocus: InboxStatusAction?
     var retryableRecordingIDs: Set<String>
     var onRetryUpload: (String) -> Void
     var onShowInbox: () -> Void
@@ -761,14 +752,6 @@ struct WorkspaceSectionView: View {
                                         onRetryUpload: { onRetryUpload(recording.id) }
                                     )
                                 }
-                            }
-                        }
-                        .overlay {
-                            if let inboxRecoveryFocus {
-                                Text("Recording recovery")
-                                    .frame(width: 1, height: 1)
-                                    .opacity(0.01)
-                                    .accessibilityIdentifier("mac.inbox.recovery.\(inboxRecoveryFocus.rawValue)")
                             }
                         }
                     case .ideas:

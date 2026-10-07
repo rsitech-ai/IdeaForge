@@ -346,16 +346,16 @@ class JobQueue:
                 or current["lease_expires_at"] <= _timestamp(now)
             ):
                 raise JobLeaseError("Job is not leased by this worker")
-            # Uploads can arrive before their canonical workspace snapshot. Waiting
-            # for that prerequisite is not a failed transcription attempt.
-            waiting_for_workspace = (
+            # Missing workspace state and disabled sync are prerequisites, not
+            # failed transcription attempts. Preserve the remaining retry budget.
+            waiting_for_prerequisite = (
                 retryable
                 and current["kind"] == "recording_enrichment"
-                and diagnostic_code == "workspace_recording_missing"
+                and diagnostic_code in {"workspace_recording_missing", "workspace_sync_disabled"}
             )
-            attempt_count = current["attempt_count"] - int(waiting_for_workspace)
+            attempt_count = current["attempt_count"] - int(waiting_for_prerequisite)
             terminal = not retryable or attempt_count >= self.maximum_attempts
-            if waiting_for_workspace:
+            if waiting_for_prerequisite:
                 status = "queued"
                 available_at = _timestamp(now + timedelta(seconds=30))
             elif terminal:

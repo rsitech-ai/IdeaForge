@@ -92,8 +92,8 @@ new_fixture() {
   cp "$ROOT_DIR/LICENSE" "$fixture/LICENSE"
   cp "$ROOT_DIR/NOTICE" "$fixture/NOTICE"
   cp "$ROOT_DIR/THIRD_PARTY_NOTICES.md" "$fixture/THIRD_PARTY_NOTICES.md"
-  cp "$ROOT_DIR/ThirdPartyLicenses/Sparkle-2.9.4-LICENSE.txt" \
-    "$fixture/ThirdPartyLicenses/Sparkle-2.9.4-LICENSE.txt"
+  cp "$ROOT_DIR/ThirdPartyLicenses/Sparkle-2.9.6-LICENSE.txt" \
+    "$fixture/ThirdPartyLicenses/Sparkle-2.9.6-LICENSE.txt"
   chmod +x "$fixture/script/release_macos.sh"
   printf '%s\n' \
     'settings:' \
@@ -152,8 +152,8 @@ make_app() {
   cp "$fixture/LICENSE" "$app/Contents/Resources/LICENSE"
   cp "$fixture/NOTICE" "$app/Contents/Resources/NOTICE"
   cp "$fixture/THIRD_PARTY_NOTICES.md" "$app/Contents/Resources/THIRD_PARTY_NOTICES.md"
-  cp "$fixture/ThirdPartyLicenses/Sparkle-2.9.4-LICENSE.txt" \
-    "$app/Contents/Resources/ThirdPartyLicenses/Sparkle-2.9.4-LICENSE.txt"
+  cp "$fixture/ThirdPartyLicenses/Sparkle-2.9.6-LICENSE.txt" \
+    "$app/Contents/Resources/ThirdPartyLicenses/Sparkle-2.9.6-LICENSE.txt"
   chmod +x "$app/Contents/MacOS/IdeaForge" "$app/Contents/Frameworks/Sparkle.framework/Versions/B/Sparkle"
 }
 
@@ -256,7 +256,7 @@ DETAILS
     ;;
   hdiutil)
     stage="${@: -5:1}"
-    for legal_file in LICENSE NOTICE THIRD_PARTY_NOTICES.md ThirdPartyLicenses/Sparkle-2.9.4-LICENSE.txt; do
+    for legal_file in LICENSE NOTICE THIRD_PARTY_NOTICES.md ThirdPartyLicenses/Sparkle-2.9.6-LICENSE.txt; do
       [[ -f "$stage/IdeaForge.app/Contents/Resources/$legal_file" ]] || exit 95
     done
     output="${!#}"
@@ -391,7 +391,7 @@ assert_contains '"readiness": "notarized_release_ready"' "$fixture/dist/release/
 test -f "$fixture/dist/release/IdeaForge-0.1.0.dmg"
 test -f "$fixture/dist/release/IdeaForge-0.1.0.zip"
 test -f "$fixture/dist/release/SHA256SUMS"
-for legal_file in LICENSE NOTICE THIRD_PARTY_NOTICES.md ThirdPartyLicenses/Sparkle-2.9.4-LICENSE.txt; do
+for legal_file in LICENSE NOTICE THIRD_PARTY_NOTICES.md ThirdPartyLicenses/Sparkle-2.9.6-LICENSE.txt; do
   unzip -Z1 "$fixture/dist/release/IdeaForge-0.1.0.zip" \
     | grep -Fx "IdeaForge.app/Contents/Resources/$legal_file" >/dev/null \
     || fail "update ZIP omitted $legal_file"

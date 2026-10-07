@@ -328,7 +328,7 @@ def analyze_showdestinations(output: str) -> XcodeDestinationAnalysis:
     in_destination_section = False
     for line in output.splitlines():
         stripped = line.strip()
-        if re.search(r"(?:Available|Ineligible) destinations for ", stripped):
+        if re.search(r'(?:Available|Ineligible) destinations for |Destinations (?:compatible|incompatible) with the ".+" scheme:', stripped):
             recognized_sections += 1
             in_destination_section = True
             continue
@@ -376,7 +376,7 @@ def showdestinations_format_error(analysis: XcodeDestinationAnalysis) -> str | N
 
 
 def has_showdestinations_section(output: str) -> bool:
-    return re.search(r"(?:Available|Ineligible) destinations for ", output) is not None
+    return analyze_showdestinations(output).recognized_sections > 0
 
 
 def devices_from_destinations(destinations: list[XcodeDestination]) -> list[PhysicalDevice]:
@@ -805,6 +805,13 @@ Available destinations for the "IdeaForgeiOS" scheme:
 """
     )
     assert len(destinations) == 2
+    compatible_header = 'Destinations compatible with the "IdeaForgeiOS" scheme:'
+    compatible_output = compatible_header + '\n{ platform:iOS, id:DEVICE-ID, name:Fixture iPhone }\n'
+    assert has_showdestinations_section(compatible_header)
+    assert has_showdestinations_section('Destinations incompatible with the "IdeaForgeWatch" scheme:')
+    assert parse_showdestinations(compatible_output) == [
+        XcodeDestination(platform="iOS", identifier="DEVICE-ID", name="Fixture iPhone")
+    ]
     assert has_showdestinations_section('Available destinations for the "IdeaForgeiOS" scheme:')
     assert not has_showdestinations_section("unexpected tool output")
     malformed_destinations = analyze_showdestinations(

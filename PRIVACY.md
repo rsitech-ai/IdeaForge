@@ -27,6 +27,6 @@ Logs must not contain raw audio, transcript text, artifact bodies, bearer tokens
 
 ## Third parties
 
-The Mac client links Sparkle 2.9.4 for updates. Apple frameworks provide recording, Keychain storage, StoreKit on iPhone, and Watch connectivity. A backend operator may configure OpenAI or another service behind the documented backend contract. The repository contains no deployed hosted backend and sends no provider request without explicit backend configuration.
+The Mac client links Sparkle 2.9.6 for updates. Apple frameworks provide recording, Keychain storage, StoreKit on iPhone, and Watch connectivity. A backend operator may configure OpenAI or another service behind the documented backend contract. The repository contains no deployed hosted backend and sends no provider request without explicit backend configuration.
 
 Read [docs/SELF_HOSTING.md](docs/SELF_HOSTING.md) before operating the community backend. It has development-grade security and no multi-tenant isolation.
