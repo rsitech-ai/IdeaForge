@@ -22,6 +22,11 @@ METADATA_AUDIT = ROOT / "script/audit_public_git_metadata.py"
 
 
 class CIReleaseConfigurationTests(unittest.TestCase):
+    def test_release_tool_archive_matches_patched_sparkle_release(self) -> None:
+        release = RELEASE.read_text(encoding="utf-8")
+        self.assertIn("https://github.com/sparkle-project/Sparkle/releases/download/2.9.6/Sparkle-2.9.6.tar.xz", release)
+        self.assertIn("52bf9e88cdd972fc0c81501377a880e90d47031bd8ca5462488f843e2609e192", release)
+
     def test_ci_is_read_only_pinned_and_runs_repository_gates(self) -> None:
         text = CI.read_text(encoding="utf-8")
         self.assertIn("permissions:\n  contents: read", text)
@@ -165,7 +170,7 @@ class CIReleaseConfigurationTests(unittest.TestCase):
             packages = {item["name"]: item for item in payload["packages"]}
             self.assertEqual(packages["IdeaForge"]["versionInfo"], "0.1.0")
             self.assertEqual(packages["IdeaForge"]["licenseConcluded"], "Apache-2.0")
-            self.assertEqual(packages["Sparkle"]["versionInfo"], "2.9.4")
+            self.assertEqual(packages["Sparkle"]["versionInfo"], "2.9.6")
             self.assertEqual(packages["Sparkle"]["licenseConcluded"], "MIT")
             self.assertEqual(
                 payload["documentNamespace"],
@@ -184,13 +189,13 @@ class CIReleaseConfigurationTests(unittest.TestCase):
             )
             self.assertEqual(
                 packages["Sparkle"]["externalRefs"][1]["referenceLocator"],
-                "git+https://github.com/sparkle-project/Sparkle@b6496a74a087257ef5e6da1c5b29a447a60f5bd7",
+                "git+https://github.com/sparkle-project/Sparkle@ac2def288cbff5cfc7df3ffef6abdf45b72bcb0a",
             )
             self.assertEqual(
                 packages["Sparkle"]["checksums"][0]["checksumValue"],
-                "cb6fdbdc8884f15d62a616e79face92b08322410fd2d425edc6596ccbf4ba3b0",
+                "8d5fb41d960b43f4a68aa14126bf62b098544ec8d191cdcc73eb14e63a8e7606",
             )
-            self.assertIn("Sparkle@2.9.4", packages["Sparkle"]["externalRefs"][0]["referenceLocator"])
+            self.assertIn("Sparkle@2.9.6", packages["Sparkle"]["externalRefs"][0]["referenceLocator"])
 
     def test_sbom_generator_rejects_version_drift(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

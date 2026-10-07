@@ -15,7 +15,7 @@ import unittest
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 AUDITOR = SCRIPT_DIR / "audit_public_source.py"
-SPARKLE_LICENSE = SCRIPT_DIR.parent / "ThirdPartyLicenses/Sparkle-2.9.4-LICENSE.txt"
+SPARKLE_LICENSE = SCRIPT_DIR.parent / "ThirdPartyLicenses/Sparkle-2.9.6-LICENSE.txt"
 
 
 class PublicSourceAuditTests(unittest.TestCase):
@@ -110,7 +110,7 @@ class PublicSourceAuditTests(unittest.TestCase):
 
     def test_allows_only_hash_verified_verbatim_third_party_license(self) -> None:
         license_bytes = SPARKLE_LICENSE.read_bytes()
-        destination = "ThirdPartyLicenses/Sparkle-2.9.4-LICENSE.txt"
+        destination = "ThirdPartyLicenses/Sparkle-2.9.6-LICENSE.txt"
         self.write(destination, license_bytes)
         allowed_result, allowed_report = self.run_audit()
         self.assertEqual(allowed_result.returncode, 0, allowed_result.stderr)

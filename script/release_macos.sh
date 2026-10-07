@@ -163,7 +163,7 @@ for legal_resource in \
   LICENSE \
   NOTICE \
   THIRD_PARTY_NOTICES.md \
-  ThirdPartyLicenses/Sparkle-2.9.4-LICENSE.txt; do
+  ThirdPartyLicenses/Sparkle-2.9.6-LICENSE.txt; do
   [[ -f "$EXPORTED_APP/Contents/Resources/$legal_resource" ]] \
     || fail "exported application omitted required legal resource: $legal_resource"
 done
