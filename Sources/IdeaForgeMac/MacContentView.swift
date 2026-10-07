@@ -613,11 +613,11 @@ struct SidebarView: View {
             } label: {
                 Label("Tools", systemImage: "wrench.and.screwdriver")
                     .font(.body.weight(.medium))
+                    .accessibilityIdentifier("mac.sidebar.tools")
+                    .accessibilityLabel("Tools")
+                    .accessibilityValue(isToolsExpanded ? "Expanded" : "Collapsed")
+                    .accessibilityHint("Shows Workflows, Templates, Exports, and Integrations")
             }
-            .accessibilityIdentifier("mac.sidebar.tools")
-            .accessibilityLabel("Tools")
-            .accessibilityValue(isToolsExpanded ? "Expanded" : "Collapsed")
-            .accessibilityHint("Shows Workflows, Templates, Exports, and Integrations")
         }
         .listStyle(.sidebar)
         .focusSection()
